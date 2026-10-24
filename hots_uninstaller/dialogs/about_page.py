@@ -1,0 +1,244 @@
+import os
+import webbrowser
+
+from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel, QWidget, QGridLayout, QSizePolicy
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPixmap
+
+from ..icons import FIF
+from ..ui_parts import IconWidget
+from ..constants import DARK, load_settings, save_settings
+from ..widgets_qt import HOTSPage, HOTSDialog, HOTSButton, HOTSSwitch, colored_svg_icon
+from ..i18n import T
+from ..bg_tasks import register_qthread, is_shutting_down
+
+from ._about_shared import APP_VERSION, _UpdateCheckWorker, _parse_version, _safe_t
+
+
+class AboutPage(HOTSPage):
+    def __init__(self, parent=None):
+        super().__init__("aboutInterface", FIF.INFO,
+                          _safe_t("about_title", "About"), parent)
+        self._build()
+
+    def _find_asset(self, name: str) -> str:
+        from ..resource_utils import resource_path
+        p = resource_path(name)
+        return p if os.path.exists(p) else ""
+
+    def _build(self):
+        cl = self.content_layout
+
+        top = QWidget()
+        top.setStyleSheet(
+            f"background: {DARK['panel_bg']}; border: 1px solid {DARK['border_faint']}; border-radius: 6px;"
+        )
+        top.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        top_outer_lay = QVBoxLayout(top)
+        top_outer_lay.setContentsMargins(20, 17, 20, 14)
+        top_outer_lay.setSpacing(8)
+
+        top_lay = QHBoxLayout()
+        top_lay.setSpacing(16)
+        top_outer_lay.addLayout(top_lay)
+
+        logo_lbl = QLabel()
+        logo_lbl.setStyleSheet("background: transparent; border: none;")
+        logo_path = self._find_asset("graphic/logo.png")
+        if logo_path:
+            pix = QPixmap(logo_path)
+            if not pix.isNull():
+                scaled = pix.scaledToHeight(126, Qt.SmoothTransformation)
+                logo_lbl.setPixmap(scaled)
+                logo_lbl.setFixedSize(scaled.size())
+        top_lay.addWidget(logo_lbl, 0, Qt.AlignBottom)
+
+        col = QWidget()
+        col.setStyleSheet("background: transparent; border: none;")
+        col_lay = QVBoxLayout(col)
+        col_lay.setContentsMargins(0, 0, 0, 0)
+        col_lay.setSpacing(4)
+
+        sub = QLabel(T("about_subtitle"))
+        sub.setWordWrap(True)
+        sub.setStyleSheet(f"color: {DARK['fg2']}; font-size: 11pt; background: transparent; border: none;")
+        col_lay.addWidget(sub)
+
+        ver = QLabel(T("about_version", v=APP_VERSION))
+        ver.setStyleSheet(f"color: {DARK['fg2']}; font-size: 9pt; background: transparent; border: none;")
+        col_lay.addWidget(ver)
+
+        top_lay.addWidget(col, 1, Qt.AlignBottom)
+
+        self._website_btn = HOTSButton(FIF.GLOBE, "#60c8ff", T("about_website_btn"))
+        self._website_btn.fit_to_content()
+        self._website_btn.clicked.connect(lambda: webbrowser.open("https://hotstools.com"))
+        right_w = QWidget()
+        right_w.setFixedHeight(126)
+        right_w.setStyleSheet("background: transparent; border: none;")
+        right_col = QVBoxLayout(right_w)
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(0)
+        right_col.addStretch(1)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(16)
+        btn_row.addWidget(self._website_btn)
+
+        self._update_btn = HOTSButton(FIF.SYNC, "#60c8ff", T("about_check_update"))
+        self._update_btn.fit_to_content()
+        self._update_btn.clicked.connect(self._check_for_updates)
+        btn_row.addWidget(self._update_btn)
+        right_col.addLayout(btn_row)
+        right_col.addStretch(1)
+
+        startup_checked = str(load_settings().get("check_updates_on_startup", "1")).strip().lower() in ("1", "true", "yes")
+        self._update_startup_cb = HOTSSwitch(T("about_check_update_startup"), font_pt=8, color=DARK['fg2'], spacing=8)
+        self._update_startup_cb.setChecked(startup_checked)
+        self._update_startup_cb.setFocusPolicy(Qt.NoFocus)
+        self._update_startup_cb.toggled.connect(self._on_check_update_startup_toggled)
+        right_col.addWidget(self._update_startup_cb, 0, Qt.AlignRight)
+        top_lay.addWidget(right_w)
+
+        cl.addWidget(top)
+        cl.addSpacing(6)
+
+        desc_w = QWidget()
+        desc_w.setStyleSheet(
+            f"background: {DARK['panel_bg']}; border: 1px solid {DARK['border_faint']}; border-radius: 6px;"
+        )
+        desc_lay = QVBoxLayout(desc_w)
+        desc_lay.setContentsMargins(20, 14, 20, 14)
+
+        desc = QLabel(T("about_desc"))
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"color: {DARK['fg']}; font-size: 9pt; background: transparent; border: none;")
+        desc_lay.addWidget(desc)
+        cl.addWidget(desc_w)
+        cl.addSpacing(6)
+
+        feat_w = QWidget()
+        feat_w.setStyleSheet(
+            f"background: {DARK['panel_bg']}; border: 1px solid {DARK['border_faint']}; border-radius: 6px;"
+        )
+        feat_lay = QGridLayout(feat_w)
+        feat_lay.setContentsMargins(20, 14, 20, 14)
+        feat_lay.setSpacing(4)
+
+        features = [
+            (FIF.DESKTOP,       T("about_feat_list")),
+            (FIF.DELETE,        T("about_feat_uninstall")),
+            (FIF.BROOM,         T("about_feat_leftovers")) if hasattr(FIF, "BROOM") else (FIF.DELETE, T("about_feat_leftovers")),
+            (FIF.ROBOT,         T("about_feat_force")) if hasattr(FIF, "ROBOT") else (FIF.SETTING, T("about_feat_force")),
+            (FIF.STORE_MICROSOFT, T("about_feat_appx")),
+            (FIF.SPEED_HIGH,    T("about_feat_startup")) if hasattr(FIF, "SPEED_HIGH") else (FIF.SYNC, T("about_feat_startup")),
+            (FIF.BROOM,         T("about_feat_junk")) if hasattr(FIF, "BROOM") else (FIF.DELETE, T("about_feat_junk")),
+            (FIF.SEARCH,        T("about_feat_monitor")),
+            (FIF.SEARCH,        T("about_feat_search")),
+            (FIF.PALETTE,       T("about_feat_theme")),
+            (FIF.LANGUAGE,      T("about_feat_lang")),
+        ]
+        for i, (icon, label) in enumerate(features):
+            row, col = divmod(i, 2)
+            cell = QWidget()
+            cell.setStyleSheet("background: transparent; border: none;")
+            cell_lay = QHBoxLayout(cell)
+            cell_lay.setContentsMargins(0, 2, 0, 2)
+            cell_lay.setSpacing(6)
+
+            ico = IconWidget(icon)
+            ico.setFixedSize(15, 15)
+            ico.setIcon(colored_svg_icon(icon, QColor(DARK["accent"]), sizes=(15,)))
+            ico.setAttribute(Qt.WA_TransparentForMouseEvents)
+            cell_lay.addWidget(ico, 0, Qt.AlignVCenter)
+
+            txt = QLabel(label)
+            txt.setStyleSheet(f"color: {DARK['fg']}; font-size: 9pt; background: transparent; border: none;")
+            cell_lay.addWidget(txt)
+            cell_lay.addStretch()
+            feat_lay.addWidget(cell, row, col)
+
+        cl.addWidget(feat_w)
+        cl.addSpacing(6)
+
+        footer = QWidget()
+        footer.setStyleSheet(
+            f"background: {DARK['panel_bg']}; border: 1px solid {DARK['border_faint']}; border-radius: 6px;"
+        )
+        footer_lay = QHBoxLayout(footer)
+        footer_lay.setContentsMargins(16, 10, 12, 10)
+
+        author = QLabel(T("about_footer"))
+        author.setStyleSheet(f"color: {DARK['fg2']}; font-size: 8pt; background: transparent; border: none;")
+        footer_lay.addWidget(author)
+        footer_lay.addStretch()
+        cl.addWidget(footer)
+
+    def _on_check_update_startup_toggled(self, checked: bool):
+        fresh = load_settings()
+        fresh["check_updates_on_startup"] = bool(checked)
+        save_settings(fresh)
+
+    def _check_for_updates(self):
+        if getattr(self, "_known_update_url", None):
+            webbrowser.open(self._known_update_url)
+            self._known_update_url = None
+            self._update_btn.set_icon(FIF.SYNC, "#60c8ff")
+            self._update_btn.set_label(T("about_check_update"))
+            self._update_btn.fit_to_content()
+            return
+        if getattr(self, "_update_worker", None) is not None and self._update_worker.isRunning():
+            return
+
+        self._update_btn.setEnabled(False)
+        self._update_btn.set_label(T("about_checking_update"))
+        self._update_btn.fit_to_content()
+
+        self._update_worker = _UpdateCheckWorker(self)
+        self._update_worker.finished_ok.connect(self._on_update_check_ok)
+        self._update_worker.failed.connect(self._on_update_check_failed)
+        self._update_worker.finished.connect(self._reset_update_button)
+        self._update_worker.finished.connect(self._update_worker.deleteLater)
+        register_qthread(self._update_worker)
+        self._update_worker.start()
+
+    def _reset_update_button(self):
+        if is_shutting_down():
+            return
+        self._update_worker = None
+        self._update_btn.setEnabled(True)
+        if not getattr(self, "_known_update_url", None):
+            self._update_btn.set_label(T("about_check_update"))
+        self._update_btn.fit_to_content()
+
+    def apply_known_update(self, tag: str, url: str):
+        self._known_update_url = url
+        self._update_btn.set_icon(FIF.DOWNLOAD, "#60c8ff")
+        self._update_btn.set_label(T("about_download_update"))
+        self._update_btn.fit_to_content()
+
+    def _on_update_check_ok(self, latest_tag: str, release_url: str):
+        latest_v = _parse_version(latest_tag)
+        current_v = _parse_version(APP_VERSION)
+
+        if latest_v > current_v:
+            self.apply_known_update(latest_tag, release_url)
+            open_it = HOTSDialog.ask(
+                self,
+                T("about_update_available_title"),
+                T("about_update_available_msg").format(version=latest_tag, current=APP_VERSION),
+            )
+            if open_it:
+                webbrowser.open(release_url)
+        else:
+            HOTSDialog.info(
+                self,
+                T("about_update_uptodate_title"),
+                T("about_update_uptodate_msg").format(current=APP_VERSION),
+            )
+
+    def _on_update_check_failed(self, error: str):
+        HOTSDialog.error(
+            self,
+            T("about_update_error_title"),
+            T("about_update_error_msg").format(error=error),
+        )

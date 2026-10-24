@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Nuitka and Inno Setup build output
+*.build/
+*.dist/
+*.onefile-build/
+Output/
