@@ -1,6 +1,6 @@
 <div align="center">
 
-# HOTS Uninstaller
+<img src="assets/banner.png" alt="HOTS Uninstaller" width="600"/>
 
 **Remove programs completely — including the leftovers — and keep your Windows tidy. Free, lightweight, no bloat.**
 
@@ -8,16 +8,9 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20%2864--bit%29-0078D4?logo=windows)](https://github.com/)
 [![Language](https://img.shields.io/badge/Language-EN%20%7C%20PL%20%7C%20FR%20%7C%20DE%20%7C%20ES-brightgreen)](#language-support)
 
-### 🚧 First release coming soon
+### [Download for Windows - free](https://github.com/darsono6/HOTS-Uninstaller/releases/latest/download/HOTS_Uninstaller_setup.exe)
 
-*No account, no subscription, no ads. The download will appear here — preview and details at **[hotstools.com/uninstaller](https://hotstools.com/uninstaller/)**.*
-
-<!-- When 1.0 is published, replace the "coming soon" block above with the download button:
-
-### 📥 [⬇️ Download for Windows — free](https://github.com/darsono6/HOTS-Uninstaller/releases/latest/download/HOTS_Uninstaller_setup.exe)
-
-*No account, no subscription, no ads. Just download and run.*
--->
+*No account, no subscription, no ads. Just download and run - details at **[hotstools.com/uninstaller](https://hotstools.com/uninstaller/)**.*
 
 <img src="assets/screenshot_main.png" alt="HOTS Uninstaller in front, with HOTS Hosts Lite and HOTS Hosts behind it" width="650"/>
 
