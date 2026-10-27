@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20%2864--bit%29-0078D4?logo=windows)](https://github.com/)
 [![Language](https://img.shields.io/badge/Language-EN%20%7C%20PL%20%7C%20FR%20%7C%20DE%20%7C%20ES-brightgreen)](#language-support)
 
-### [Download for Windows - free](https://github.com/darsono6/HOTS-Uninstaller/releases/latest/download/HOTS_Uninstaller_setup.exe)
+### [Download for Windows - free](https://github.com/darsono6/HOTS-Uninstaller/releases/latest)
 
 *No account, no subscription, no ads. Just download and run - details at **[hotstools.com/uninstaller](https://hotstools.com/uninstaller/)**.*
 
@@ -31,10 +31,6 @@ Nothing is deleted behind your back: every cleanup shows you a list first, and r
 ---
 
 ## Getting started
-
-> 🚧 **Not released yet.** The first public release (1.0) is on its way, and this section goes live with it. Until then, see the [preview page](https://hotstools.com/uninstaller/).
-
-Once it's published:
 
 1. Download the installer from the [Releases page](https://github.com/darsono6/HOTS-Uninstaller/releases/latest)
 2. Double-click it — Windows will ask for Administrator permission (that's normal, the app needs it to remove programs and edit the registry)
