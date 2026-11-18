@@ -6,20 +6,16 @@ import faulthandler
 from pathlib import Path
 
 
-_LOG_MAX_BYTES = 250 * 1024
+_LOG_MAX_BYTES = 1024 * 1024
 _LOG_PATH = Path(os.environ.get("APPDATA", Path.home())) / "HOTS Uninstaller" / "error.log"
 
 
 def _prepare_log_file(path: Path, max_bytes: int = _LOG_MAX_BYTES) -> None:
-    """Rotates the log to error.log.1 once it exceeds max_bytes. A symlink in place of
-    the log is removed, because the elevated process would append through it to a
-    foreign file.
-    """
     try:
         if os.path.islink(path):
             os.unlink(path)
         elif os.path.isfile(path) and os.path.getsize(path) > max_bytes:
-            os.replace(path, str(path) + ".1")
+            open(path, "w").close()
     except OSError:
         pass
 
@@ -28,9 +24,6 @@ def _setup_error_log():
     try:
         _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         log_path = _LOG_PATH
-        # If the launcher (.pyw) already opened the log, do not open it again, but
-        # enable faulthandler ALWAYS (an early "return" used to skip it in the normal
-        # launcher run).
         if getattr(sys.stderr, "name", None) != str(log_path):
             _prepare_log_file(log_path)
             sys.stderr = open(log_path, "a", encoding="utf-8", buffering=1)
@@ -199,10 +192,10 @@ def _crash_texts(tb: str, log_path):
         from .i18n import T, set_lang, pick_lang
         set_lang(pick_lang(load_settings()))
         return (T("startup_failed_title", app="HOTS Uninstaller"), T("startup_failed_msg"),
-                T("startup_failed_details", details=tb[:800], path=log_path))
+                T("startup_failed_details", details=tb.strip().splitlines()[-1][:300], path=log_path))
     except Exception:
         return ("HOTS Uninstaller — Startup Error", "The program failed to start.",
-                f"Error details:\n{tb[:800]}\n\nFull log: {log_path}")
+                f"Error details:\n{tb.strip().splitlines()[-1][:300]}\n\nFull log: {log_path}")
 
 
 def _show_crash(tb: str):

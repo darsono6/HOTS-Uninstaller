@@ -113,9 +113,7 @@ class StartupItem:
     def _compute_is_missing(self) -> bool:
         if self.kind == "appx":
             if not self.appx_lookup_ok:
-                # The Get-AppxPackage query failed (timeout/error): do not guess.
-                # Wrongly marking an active task as a "phantom" is a worse mistake than
-                # missing a truly orphaned entry.
+                # Query failed: do not guess; wrongly flagging an active task as a phantom is worse than missing an orphan.
                 return False
             return not self.install_location
         if self.kind == "task":
@@ -151,18 +149,6 @@ def _extract_exe_path(cmd: str) -> str:
 
 
 def _approved_location_for_item(kind: str, scope: str, subkey: str, run_type: str, raw_name: str, path: str):
-    """Maps an entry to its location in the StartupApproved key, where Task Manager /
-    Windows Settings really store the enabled/disabled state (the Run key alone is
-    not reliable: Windows can disable an entry without touching Run). Returns (hive,
-    approved_subkey, value_name), or None if Windows does not track this kind of
-    entry that way (RunOnce/Policy/RunServices always run unconditionally).
-    IMPORTANT: raw_name/path must be the CURRENT name of the value / file, exactly
-    as it is in Run / the Startup folder right now. StartupApproved is keyed 1:1 by
-    that exact name (that is how Windows checks it at logon). Stripping the
-    "_HOTSDisabled_" prefix here once wrote the flag under a name that no longer
-    existed in Run, so Windows treated the entry as ENABLED while the UI showed it
-    as disabled.
-    """
     if kind == "registry":
         if run_type != "Run":
             return None
@@ -253,11 +239,7 @@ def _list_scheduled_tasks() -> list[StartupItem]:
             name = entry.get("Name") or ""
             if not name:
                 continue
-            # Settings.Enabled (the real on/off flag), NOT .State
-            # (Ready/Running/Disabled/Queued is the current EXECUTION state). A task
-            # that is actively running (e.g. MSI Afterburner) has .State="Running" even
-            # when it is disabled, so the toggle would falsely show "enabled" after
-            # every refresh.
+            # Use Settings.Enabled, not .State: a running task has State=Running even when it is disabled.
             enabled = bool(entry.get("Enabled", True))
             items.append(StartupItem(
                 kind="task", scope="Task", enabled=enabled,
@@ -492,10 +474,6 @@ def toggle_startup_item(item: StartupItem) -> tuple[bool, str]:
     disable = item.enabled
     try:
         if item.kind == "appx":
-            # The same registry branch that Task Manager's Startup tab uses to
-            # enable/disable such tasks (per an independent Procmon analysis). It is NOT
-            # an officially documented Microsoft contract (like StartupApproved above);
-            # when in doubt, verify the state in Task Manager after toggling here.
             sub = f"{_APPX_STARTUP_ROOT}\\{item.package_family_name}\\{item.raw_value_name}"
             new_state = 1 if disable else 2
             key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, sub, 0, winreg.KEY_SET_VALUE)
@@ -506,14 +484,7 @@ def toggle_startup_item(item: StartupItem) -> tuple[bool, str]:
             return True, ""
 
         if item.kind == "task":
-            # Tasks have their own native on/off mechanism in Task Scheduler (nothing to
-            # rename, unlike Run/folder entries), so we just call the cmdlet. IMPORTANT:
-            # without an explicit $ErrorActionPreference='Stop' and a state check AFTER
-            # the change, a failed attempt (e.g. "Access is denied" on tasks protected
-            # by stronger permissions, typical for UAC-bypass tasks created by other
-            # programs) ends with exit code 0 although nothing changed: PowerShell.exe
-            # does not return an error for a non-terminating cmdlet error by default.
-            # The UI would then show a false success.
+            # Without $ErrorActionPreference='Stop' and a state check after the change, a failed attempt still exits with 0.
             verb = "Disable-ScheduledTask" if disable else "Enable-ScheduledTask"
             name_q = item.raw_value_name.replace("'", "''")
             path_q = item.task_folder.replace("'", "''")
@@ -537,10 +508,7 @@ def toggle_startup_item(item: StartupItem) -> tuple[bool, str]:
             return True, ""
 
         if item.kind == "service":
-            # "Disabling" a service from this program means startup type Disabled, NOT
-            # Manual. The listing filter shows "Auto" and "Disabled" but SKIPS "Manual",
-            # so with Manual the entry would vanish from the list right after being
-            # disabled.
+            # Disabled, not Manual: the list filter skips Manual, so the entry would vanish right after disabling.
             start_type = "Disabled" if disable else "Automatic"
             name_q = item.raw_value_name.replace("'", "''")
             ok, err = _run_powershell(
@@ -599,10 +567,7 @@ def remove_startup_item(item: StartupItem) -> tuple[bool, str]:
     try:
         if item.kind == "service":
             if not item.is_missing:
-                # Deleting a service (sc delete) can permanently break the application
-                # it belongs to: too risky for "remove" while that application really
-                # exists. The enable/disable toggle (Automatic/Disabled) does the same
-                # safely and reversibly.
+                # sc delete can permanently break the owning application; the enable/disable toggle is the safe alternative.
                 return False, T("err_service_remove_blocked")
             name_q = item.raw_value_name.replace("'", "''")
             ok, out = _run_powershell(
@@ -623,11 +588,6 @@ def remove_startup_item(item: StartupItem) -> tuple[bool, str]:
         if item.kind == "appx":
             return False, T("err_appx_startup_remove_blocked")
         if item.kind == "task":
-            # As in toggle_startup_item: do not trust the PowerShell exit code alone
-            # (Confirm:$false with no exception does not always mean the task REALLY
-            # disappeared; "Delete" and "Change state" are separate permissions in the
-            # task's security descriptor, so one may succeed where the other gets Access
-            # denied). Verify afterwards that the task is really gone.
             name_q = item.raw_value_name.replace("'", "''")
             path_q = item.task_folder.replace("'", "''")
             ok, out = _run_powershell(

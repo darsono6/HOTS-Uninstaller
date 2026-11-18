@@ -311,8 +311,7 @@ def scan_portable(exe_path: str) -> list:
     return items
 
 
-# Paths from the queue are never deleted automatically: they go through validation and
-# end up in a window where the user sees the full path and confirms.
+# Queued paths are never deleted automatically: the user sees the full path and confirms.
 def _queue_path() -> Path:
     base = Path(os.environ.get("APPDATA") or Path.home())
     return base / "HOTS Uninstaller" / "pending_remove.txt"
@@ -339,9 +338,7 @@ def strip_remove_args(argv: list) -> list:
 
 
 def pop_pending_requests() -> list:
-    """Reads and clears the queue. The file is renamed before reading, so a task
-    appended in the meantime lands in a new file instead of being lost.
-    """
+    # The file is renamed before reading, so a task appended meanwhile lands in a new file.
     queue = _queue_path()
     work = queue.with_suffix(".proc")
     try:

@@ -548,7 +548,7 @@ class JunkPage(HOTSPage):
 
     def _card_style(self) -> str:
         return (f"background: {DARK['panel_bg']}; "
-                f"border: 1px solid {DARK['border_faint']}; border-radius: 6px;")
+                f"border: 1px solid {DARK['border_faint']}; border-radius: 8px;")
 
     def _build(self):
         cl = self.content_layout
@@ -580,7 +580,7 @@ class JunkPage(HOTSPage):
         self.view.on_context_menu = self._show_context_menu
         self.view.setStyleSheet(
             f"QListView {{ background-color: {DARK['table_bg']}; "
-            f"border: 1px solid {DARK['border_soft']}; border-radius: 6px; }}"
+            f"border: 1px solid {DARK['border_soft']}; border-radius: 8px; }}"
         )
         self._summary_bar = summary_bar
         self._bottom_bar = self._build_bottom_bar()
@@ -602,7 +602,7 @@ class JunkPage(HOTSPage):
         card.setObjectName("junkSettingsCard")
         card.setStyleSheet(
             f"QWidget#junkSettingsCard {{ background: {DARK['panel_bg']}; "
-            f"border: 1px solid {DARK['border_faint']}; border-radius: 6px; }}"
+            f"border: 1px solid {DARK['border_faint']}; border-radius: 8px; }}"
         )
         lay = QVBoxLayout(card)
         lay.setContentsMargins(16, 14, 16, 14)
@@ -620,6 +620,11 @@ class JunkPage(HOTSPage):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(10)
 
+        self._all_check = HOTSSwitch(T("btn_select_all"))
+        self._all_check.clicked.connect(self._on_all_categories_clicked)
+        outer.addWidget(self._all_check)
+        outer.addWidget(h_separator())
+
         grid = QGridLayout()
         grid.setHorizontalSpacing(20)
         grid.setVerticalSpacing(6)
@@ -634,6 +639,7 @@ class JunkPage(HOTSPage):
             self._category_checks[cat.key] = cb
             grid.addWidget(cb, i, 0)
         outer.addLayout(grid)
+        self._sync_all_check()
 
         drives = cj.list_fixed_drives()
         self._drive_checks: dict = {}
@@ -699,7 +705,24 @@ class JunkPage(HOTSPage):
         fresh["junk_delete_to_recycle"] = self._recycle_check.isChecked()
         save_settings(fresh)
 
+    def _safe_category_keys(self) -> list:
+        return [cat.key for cat in cj.CATEGORIES if cat.default_on and cat.key in self._category_checks]
+
+    def _sync_all_check(self):
+        keys = self._safe_category_keys()
+        self._all_check.setChecked(bool(keys) and all(self._category_checks[k].isChecked() for k in keys))
+
+    def _on_all_categories_clicked(self, checked: bool):
+        keys = self._safe_category_keys() if checked else list(self._category_checks)
+        for key in keys:
+            cb = self._category_checks[key]
+            cb.blockSignals(True)
+            cb.setChecked(checked)
+            cb.blockSignals(False)
+        self._on_category_toggled()
+
     def _on_category_toggled(self, _state=None):
+        self._sync_all_check()
         self._sync_settings_state()
         fresh = load_settings()
         fresh["junk_categories"] = {
@@ -813,12 +836,6 @@ class JunkPage(HOTSPage):
         return [key for key, cb in self._category_checks.items() if cb.isChecked()]
 
     def _scan_async(self):
-        # begin_busy() is only a counter + spinner and doesn't block the buttons.
-        # Without this guard a second "Scan" click started a parallel scan, and
-        # "Delete selected" during a long deletion (e.g. Windows.old) started a
-        # second thread deleting the same items: doubled summaries, doubly
-        # counted recovered space, and two threads stopping/starting the same
-        # services at once.
         if self.is_busy():
             return
         self._set_settings_open(False)

@@ -1,11 +1,12 @@
 import os
 import webbrowser
+from datetime import date
 import subprocess
 from urllib.parse import quote
 
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QWidget, QLabel, QApplication,
-    QListView, QAbstractItemView, QStyledItemDelegate, QToolTip,
+    QListView, QAbstractItemView, QStyledItemDelegate,
 )
 from PySide6.QtCore import (
     Qt, QObject, Signal, QSize, QTimer, QRect, QAbstractListModel, QModelIndex,
@@ -18,7 +19,7 @@ from ..constants import DARK, css_color, load_settings, save_settings
 from ..i18n import T
 from ..proc_utils import popen_no_busy_cursor
 from ..widgets_qt import (
-    HOTSPage, HOTSButton, HOTSContextMenu,
+    HOTSPage, HOTSButton, HOTSContextMenu, SortButton,
     attach_fluent_tip, colored_svg_icon, show_fluent_popup_at,
 )
 from ..hover_help import (
@@ -31,6 +32,13 @@ from ..app_icons import (
 )
 from .. import core_appx as ca
 from .uninstall_wizard import AppxUninstallWizardDialog
+
+
+_NEW_APP_DAYS = 14
+
+
+def _is_new_app(app: "ca.AppxApp") -> bool:
+    return app.install_date is not None and (date.today() - app.install_date).days <= _NEW_APP_DAYS
 
 
 def _appx_icon_source(app: "ca.AppxApp"):
@@ -51,6 +59,8 @@ def _appx_details_tooltip(app: "ca.AppxApp") -> str:
         (T("col_version"), app.version or "—"),
         (T("col_publisher"), app.publisher_display or T("publisher_unknown")),
     ]
+    if app.install_date:
+        rows.append((T("col_install_date"), app.install_date.strftime("%d.%m.%Y")))
     if app.install_location:
         rows.append((T("info_install_path"), app.install_location))
 
@@ -179,7 +189,7 @@ class _AppxItemDelegate(HoverHelpDelegateMixin, QStyledItemDelegate):
         font.setPointSize(8)
         font.setBold(True)
         painter.setFont(font)
-        painter.setPen(QColor(DARK["fg2"]))
+        painter.setPen(QColor(DARK["accent"]))
         text_rect = option.rect.adjusted(10, 0, -10, 0)
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
         painter.restore()
@@ -291,8 +301,9 @@ class _AppxListView(HoverHelpViewMixin, QListView):
         self.empty_label.setGeometry(self.viewport().rect())
 
     def _hide_native_tip(self, *_args):
-        self._native_tip_row = -1
-        QToolTip.hideText()
+        if self._native_tip_row != -1:
+            self._native_tip_row = -1
+            self._close_help_popup()
 
     def leaveEvent(self, event):
         self._close_help_popup()
@@ -333,8 +344,8 @@ class _AppxListView(HoverHelpViewMixin, QListView):
 
             if delete_rect.contains(pos) and app.is_removal_blocked:
                 if self._native_tip_row != index.row():
+                    self._show_info_popup(T("appx_non_removable"), self.mapToGlobal(delete_rect.bottomLeft()), 300)
                     self._native_tip_row = index.row()
-                    QToolTip.showText(self.mapToGlobal(pos), T("appx_non_removable"), self)
             elif self._native_tip_row != -1:
                 self._hide_native_tip()
         else:
@@ -422,7 +433,7 @@ class AppxPage(HOTSPage):
 
     def _card_style(self) -> str:
         return (f"background: {DARK['panel_bg']}; "
-                f"border: 1px solid {DARK['border_faint']}; border-radius: 6px;")
+                f"border: 1px solid {DARK['border_faint']}; border-radius: 8px;")
 
     def _build(self):
         cl = self.content_layout
@@ -449,7 +460,7 @@ class AppxPage(HOTSPage):
         self.view.on_toggle_group = self._toggle_group
         self.view.setStyleSheet(
             f"QListView {{ background-color: {DARK['table_bg']}; "
-            f"border: 1px solid {DARK['border_soft']}; border-radius: 6px; }}"
+            f"border: 1px solid {DARK['border_soft']}; border-radius: 8px; }}"
         )
 
         cl_body.addWidget(self.view, 1)
@@ -498,6 +509,10 @@ class AppxPage(HOTSPage):
         self.search.setFixedWidth(165)
         self.search.textChanged.connect(self._on_search_changed)
         lay.addWidget(self.search)
+
+        self.sort_btn = SortButton(load_settings().get("appx_sort", "name"))
+        self.sort_btn.changed.connect(self._on_sort_changed)
+        lay.addWidget(self.sort_btn)
 
         refresh_btn = HOTSButton(FIF.SYNC, "#60c8ff", "")
         refresh_btn.setFixedSize(42, 42)
@@ -568,10 +583,20 @@ class AppxPage(HOTSPage):
                     if self._filter_text in a.display_name.lower()
                     or self._filter_text in (a.publisher_display or "").lower()]
 
+        new_apps = sorted((a for a in apps if _is_new_app(a)),
+                          key=lambda a: a.install_date, reverse=True)
+        apps_rest = [a for a in apps if not _is_new_app(a)]
+        mode = self.sort_btn.mode
+        if mode == "size":
+            apps_rest.sort(key=lambda a: a.size_kb, reverse=True)
+        elif mode == "date":
+            apps_rest.sort(key=lambda a: a.install_date or date.min, reverse=True)
+
         rows = []
         for key, label, group_apps in (
-            ("other", T("appx_group_other"), [a for a in apps if not a.is_microsoft]),
-            ("microsoft", T("appx_group_microsoft"), [a for a in apps if a.is_microsoft]),
+            ("new", T("appx_group_new"), new_apps),
+            ("other", T("appx_group_other"), [a for a in apps_rest if not a.is_microsoft]),
+            ("microsoft", T("appx_group_microsoft"), [a for a in apps_rest if a.is_microsoft]),
         ):
             if not group_apps:
                 continue
@@ -588,6 +613,12 @@ class AppxPage(HOTSPage):
         total = len(self._all_apps)
         self.status_label.setText(T("status_count_simple", shown=shown, total=total))
 
+    def _on_sort_changed(self, mode: str):
+        fresh = load_settings()
+        fresh["appx_sort"] = mode
+        save_settings(fresh)
+        self._apply_filter()
+
     def _toggle_group(self, key: str):
         self._collapsed[key] = not self._collapsed.get(key)
         fresh = load_settings()
@@ -603,10 +634,6 @@ class AppxPage(HOTSPage):
 
     def _show_context_menu(self, app, global_pos):
         items = []
-        # Protected packages (NonRemovable, or registered only for the system
-        # account; see is_removal_blocked) have the trash icon disabled in the
-        # list, so the context menu must not be a back door to the same doomed
-        # removal.
         if not app.is_removal_blocked:
             items.append(("✕", DARK["red"], T("menu_uninstall"), lambda: self._uninstall_one(app)))
         if app.install_location and os.path.isdir(app.install_location):

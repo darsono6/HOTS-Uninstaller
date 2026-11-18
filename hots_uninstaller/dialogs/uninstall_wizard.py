@@ -65,11 +65,12 @@ def _scan_key(items) -> frozenset:
 
 
 def _leftover_tooltip(item) -> str:
+    reason = textwrap.fill(T("leftover_src_" + item.source), width=60, break_long_words=False) + "\n\n" if item.source else ""
     if not item.uncertain:
-        return f"{item.path}\n\n" + textwrap.fill(T("leftover_auto_note"), width=60, break_long_words=False)
+        return f"{item.path}\n\n{reason}" + textwrap.fill(T("leftover_auto_note"), width=60, break_long_words=False)
     note_key = "leftover_userdata_note" if item.user_data else "leftover_uncertain_note"
     note = textwrap.fill(T(note_key), width=60, break_long_words=False)
-    return f"{item.path}\n\n{note}"
+    return f"{item.path}\n\n{reason}{note}"
 
 
 class _WizardSignals(QObject):
@@ -128,10 +129,7 @@ class _BaseUninstallWizardDialog(HOTSDialog):
         self._fit_height_to_content()
 
     def _start_uninstall(self):
-        # Must start the actual uninstall (preferably in a background thread)
-        # and, when done, emit self._signals.uninstall_finished (success) or
-        # self._signals.uninstall_failed(message) (error), always after
-        # checking self._is_alive(). Overridden in subclasses.
+        # Subclasses start the uninstall and emit uninstall_finished or uninstall_failed, after checking _is_alive().
         raise NotImplementedError
 
     def _scan_leftovers(self) -> list:
@@ -159,9 +157,6 @@ class _BaseUninstallWizardDialog(HOTSDialog):
         self.stack.setCurrentWidget(self.confirm_page)
 
     def reject(self):
-        # Set BEFORE closing so the background threads (waiting for the
-        # uninstaller, scanning/removing leftovers) stop touching this window
-        # after it is closed.
         self._abort_wait = True
         super().reject()
 
@@ -170,7 +165,7 @@ class _BaseUninstallWizardDialog(HOTSDialog):
 
     def _card_style(self, scope: str = "") -> str:
         body = (f"background: {DARK['panel_bg']}; "
-                f"border: 1px solid {DARK['border_faint']}; border-radius: 6px;")
+                f"border: 1px solid {DARK['border_faint']}; border-radius: 8px;")
         return f"QWidget#{scope} {{ {body} }}" if scope else body
 
     def _save_wizard_checkbox(self, key: str, checked: bool):
@@ -831,7 +826,6 @@ class _BaseUninstallWizardDialog(HOTSDialog):
         signals = self._signals
 
         def worker():
-            # Whatever happens, the wizard must leave the "please wait" page.
             try:
                 run()
             except Exception:
@@ -846,12 +840,6 @@ class _BaseUninstallWizardDialog(HOTSDialog):
             pending_reboot = 0
             errors = []
 
-            # One shared registry backup for the WHOLE operation (not a
-            # separate file per key); see backup_registry_keys_for_items() in
-            # core_uninstall.py. Without it the loop below, which removes
-            # leftovers ONE BY ONE to report progress step by step, would
-            # create a separate .reg file every time even though logically it
-            # is a single uninstall.
             _, backup_err = cu.backup_registry_keys_for_items(items, app_name=self._app.display_name)
             if backup_err:
                 errors.append(T("err_registry_backup_failed_general", error=backup_err))

@@ -16,9 +16,6 @@ from .widgets_qt import colored_svg_icon
 _ICON_PROVIDER = QFileIconProvider()
 _ICON_CACHE: dict = {}
 _SQUARE_PIXMAP_CACHE: dict = {}
-# (namespace, uid) -> icon source resolved in a background thread WITHOUT touching
-# QIcon/QPixmap (those may only be created in the GUI thread): ("image", QImage),
-# ("content", path), ("file", path), ("computer", None) or None.
 _SOURCE_CACHE: dict = {}
 _LAST_GOOD_ICON: dict = {}
 _GENERIC_ICON = None
@@ -106,11 +103,8 @@ def _image_from_resource(path: str, index: int = 0, size: int = 48):
         user32 = ctypes.windll.user32
         gdi32 = ctypes.windll.gdi32
 
-        # ctypes treats every return type as a 32-bit c_int unless argtypes/restype are
-        # set explicitly. The handles returned by the calls below (GetDC,
-        # ExtractIconExW, ...) are pointer-sized, so on 64-bit Windows they can be
-        # silently truncated, which causes intermittent missing icons (this was the real
-        # cause of the NVIDIA driver icon NVI2.dll,0 disappearing between runs).
+        # ctypes treats return types as 32-bit c_int unless argtypes/restype are set; pointer-sized handles
+        # would be truncated on 64-bit Windows, causing intermittent missing icons.
         shell32.ExtractIconExW.argtypes = [
             wintypes.LPCWSTR, ctypes.c_int,
             ctypes.POINTER(wintypes.HICON), ctypes.POINTER(wintypes.HICON),

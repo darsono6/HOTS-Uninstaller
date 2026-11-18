@@ -649,6 +649,7 @@ class _BannerIcon(QWidget):
 
 class InfoBanner(QFrame):
     closedSignal = Signal()
+    clicked = Signal()
 
     MARGIN_TOP = 24
     SLIDE_PX = 16
@@ -658,6 +659,7 @@ class InfoBanner(QFrame):
         super().__init__(parent)
         self.setObjectName("hotsInfoBanner")
         self._duration = duration
+        self._clickable = False
 
         light = IS_LIGHT_THEME
         fg = "black" if light else "white"
@@ -668,14 +670,14 @@ class InfoBanner(QFrame):
             f"QLabel {{ background-color: transparent; border: none; color: {fg}; font-size: 14px; }}"
         )
 
-        self._icon = _BannerIcon()
-        self._title = QLabel(title)
+        self._icon = _BannerIcon(self)
+        self._title = QLabel(title, self)
         self._title.setStyleSheet("font-weight: bold;")
         self._title.setVisible(bool(title))
-        self._content = QLabel(content)
+        self._content = QLabel(content, self)
         self._content.setVisible(bool(content))
 
-        self._close_btn = TransparentToolButton()
+        self._close_btn = TransparentToolButton(self)
         self._close_btn.setFixedSize(36, 36)
         self._close_btn.setIconSize(QSize(12, 12))
         self._close_btn.setIcon(make_qicon(FIF.CLOSE, "#000000" if IS_LIGHT_THEME else "#ffffff", (12,)))
@@ -714,6 +716,23 @@ class InfoBanner(QFrame):
         bar = cls(title, content, parent, closable, duration)
         bar.show()
         return bar
+
+    def set_clickable(self, clickable: bool = True):
+        self._clickable = clickable
+        self.setCursor(Qt.PointingHandCursor if clickable else Qt.ArrowCursor)
+
+    def mousePressEvent(self, e):
+        if self._clickable and e.button() == Qt.LeftButton:
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if (self._clickable and e.button() == Qt.LeftButton
+                and self.rect().contains(e.position().toPoint())):
+            self.clicked.emit()
+            return
+        super().mouseReleaseEvent(e)
 
     def _target_pos(self) -> QPoint:
         p = self.parentWidget()

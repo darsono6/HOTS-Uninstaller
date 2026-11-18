@@ -6,29 +6,23 @@ import math
 import shiboken6
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QTimer, QRect, QPoint, QProcess, QObject, Signal
+from PySide6.QtCore import Qt, QTimer, QRect, QProcess, QObject, Signal
 from PySide6.QtGui import QIcon, QPixmap, QGuiApplication, QCursor
 
-from .constants import DARK, DEFAULT_ACCENT, load_settings, save_settings
+from .constants import load_settings, save_settings, set_live_glow, set_live_transparency, updates_on_startup
 from .i18n import T, set_lang, current_lang, pick_lang
-from .widgets_qt import HOTSDialog, HOTSContextMenu
+from .widgets_qt import HOTSDialog
 from .icons import FIF
 from .ui_parts import InfoBanner
 from .nav_rail import NavRail
 from .frameless import FramelessWindow
 from .bg_tasks import start_bg_thread, is_shutting_down, register_wakeup, register_qthread
 from .dialogs import (
-    ProgramsPage, AppxPage, StartupPage, JunkPage, MonitorPage, BackupsPage, AboutPage, SupportPage,
-    LanguageDialog, AccentColorDialog,
+    ProgramsPage, AppxPage, StartupPage, JunkPage, MonitorPage, BackupsPage, AboutPage, SupportPage, OptionsPage,
 )
 
-# Activation from outside (a second launch attempt while the program is already
-# running). The NAME MUST match _ACTIVATE_EVENT_NAME in hots_uninstaller_launcher.pyw.
-# Why it exists: the program runs elevated (UAC); a second launch starts non-elevated,
-# and UIPI stops a non-elevated process from restoring or focusing the window of an
-# elevated one (ShowWindow/SetForegroundWindow may be silently ignored). So the second
-# process only SIGNALS a named Event (no special rights needed) and the already running
-# elevated process restores its OWN window.
+# The name must match _ACTIVATE_EVENT_NAME in the launcher. The program runs elevated and UIPI blocks a non-elevated
+# second launch from focusing its window, so that launch only signals this event.
 _EXTERNAL_ACTIVATE_EVENT_NAME = "Local\\HOTSUninstaller_ActivateEvent"
 
 _k32 = ctypes.windll.kernel32
@@ -64,11 +58,9 @@ def _activation_event_security_attributes():
                 ("bInheritHandle", ctypes.c_int),
             ]
 
-        # Full access: SYSTEM and Administrators. A regular (non-elevated) process of
-        # the logged-in user (IU) gets ONLY the right to set and wait on the event
-        # (0x00100002 = SYNCHRONIZE | EVENT_MODIFY_STATE): no DACL write, no ownership.
-        # No low-integrity label, so sandboxed (low IL) processes cannot set it.
-        sddl = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100002;;;IU)"
+        # SY and BA get full access; the logged-in user (IU) may only wait on and set the event and read its descriptor,
+        # so the launcher can verify the owner. No low-integrity label, so sandboxed processes cannot set it.
+        sddl = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00120002;;;IU)"
         p_sd = ctypes.c_void_p()
         ok = _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl, 1, ctypes.byref(p_sd), None
@@ -92,7 +84,7 @@ _ACCENT = None
 
 
 def _parse_saved_geometry(geo_str: str):
-    m = re.match(r"^(\d+)x(\d+)(?:\+(-?\d+)\+(-?\d+))?$", geo_str or "")
+    m = re.match(r"^(\d+)x(\d+)(?:\+(-?\d+)\+(-?\d+))?$", geo_str if isinstance(geo_str, str) else "")
     if not m:
         return 900, 650, None, None
     w, h = int(m.group(1)), int(m.group(2))
@@ -150,6 +142,16 @@ class UninstallerWindow(FramelessWindow):
         self.backupsPage = BackupsPage(self)
         self.aboutPage = AboutPage(self)
         self.supportPage = SupportPage(self)
+        self.optionsPage = OptionsPage(
+            self,
+            on_about=lambda: self._go_to(self.aboutPage, "options"),
+            on_support=lambda: self._go_to(self.supportPage, "options"),
+            on_language=self._change_language,
+            on_appearance=lambda values: self._save_settings_merged(**values),
+            on_live_glow=self._apply_live_glow,
+            on_live_transparency=self._apply_live_transparency,
+            on_restart=self._restart_app,
+        )
 
         self._build_navigation()
 
@@ -179,7 +181,7 @@ class UninstallerWindow(FramelessWindow):
         QTimer.singleShot(
             400, lambda: self.process_remove_requests([startup_path] if startup_path else None))
 
-        if str(self._settings.get("check_updates_on_startup", "1")).strip().lower() in ("1", "true", "yes"):
+        if updates_on_startup(self._settings):
             QTimer.singleShot(2500, self._check_updates_silently)
 
     def _check_updates_silently(self):
@@ -192,26 +194,32 @@ class UninstallerWindow(FramelessWindow):
         register_qthread(worker)
         worker.start()
 
-    def _on_startup_update_check_ok(self, tag: str, url: str):
+    def _on_startup_update_check_ok(self, tag: str, url: str, asset):
         if is_shutting_down() or not shiboken6.isValid(self):
             return
         from .dialogs._about_shared import _parse_version, APP_VERSION
         if _parse_version(tag) > _parse_version(APP_VERSION):
-            self._show_update_available_hud(tag, url)
-            about_page = getattr(self, "aboutPage", None)
-            if about_page is not None and shiboken6.isValid(about_page):
-                about_page.apply_known_update(tag, url)
+            self._show_update_available_hud(tag)
+            options_page = getattr(self, "optionsPage", None)
+            if options_page is not None and shiboken6.isValid(options_page):
+                options_page.apply_known_update(tag, url, asset)
 
-    def _show_update_available_hud(self, tag: str, url: str):
+    def _show_update_available_hud(self, tag: str):
         self._dismiss_update_hud()
-        self._update_release_url = url
-        self._update_infobar = InfoBanner.info(
+        banner = InfoBanner.info(
             title=T("update_hud_title"),
             content=T("update_hud_msg", version=tag),
             parent=self,
             closable=True,
             duration=-1,
         )
+        banner.set_clickable()
+        banner.clicked.connect(self._open_options_from_update_hud)
+        self._update_infobar = banner
+
+    def _open_options_from_update_hud(self):
+        self._dismiss_update_hud()
+        self._go_to(self.optionsPage, "options")
 
     def _dismiss_update_hud(self):
         ib = getattr(self, "_update_infobar", None)
@@ -335,8 +343,6 @@ class UninstallerWindow(FramelessWindow):
         LeftoverDialog(
             self, cp.build_portable_app(path),
             scan_func=lambda _app: cp.scan_portable(path),
-            # Preselected on start: the .exe itself and traces matched by its exact
-            # path. Leftovers found by NAME are selected by the user deliberately.
             preselect=lambda it: it.preselected,
             subtitle_key="leftover_portable_subtitle",
         ).exec()
@@ -375,17 +381,14 @@ class UninstallerWindow(FramelessWindow):
             self._rail.add_tile(key, icon, text,
                                 on_click=lambda p=page, k=key: self._go_to(p, k))
 
-        for page in (self.aboutPage, self.supportPage):
+        for page in (self.optionsPage, self.aboutPage, self.supportPage):
             self.stackedWidget.addWidget(page)
             self._page_rail_keys[page] = "options"
 
-        options_tile = self._rail.add_tile(
+        self._rail.add_tile(
             "options", fif("SETTING"), T("btn_options"),
-            on_click=self._on_options_clicked, bottom=True,
+            on_click=lambda: self._go_to(self.optionsPage, "options"), bottom=True,
         )
-        self._options_menu = None
-        self._options_menu_was_open = False
-        options_tile.pressed.connect(self._remember_options_menu_state)
 
         self.stackedWidget.currentChanged.connect(self._sync_rail_from_stack)
         self._rail.set_current("programs")
@@ -397,30 +400,6 @@ class UninstallerWindow(FramelessWindow):
     def _sync_rail_from_stack(self, index: int):
         widget = self.stackedWidget.widget(index)
         self._rail.set_current(self._page_rail_keys.get(widget))
-
-    def _remember_options_menu_state(self):
-        menu = self._options_menu
-        self._options_menu_was_open = bool(
-            menu is not None and shiboken6.isValid(menu) and menu.isVisible()
-        )
-
-    def _on_options_clicked(self):
-        if self._options_menu_was_open:
-            self._options_menu_was_open = False
-            return
-        items = [
-            ("\u2139", DARK["fg2"],    T("opt_about"),      lambda: self._go_to(self.aboutPage, "options")),
-            ("\u2665", DARK["red"],    T("opt_support"),    lambda: self._go_to(self.supportPage, "options")),
-            None,
-            ("\U0001F310", "#60c8ff",  T("opt_language"),   self._change_language),
-            ("\U0001F3A8", DARK["accent"], T("opt_appearance"), self._change_accent_color),
-        ]
-        menu = HOTSContextMenu(self, items)
-        self._options_menu = menu
-        menu.adjustSize()
-        tile = self._rail.tile("options")
-        anchor = tile.mapToGlobal(QPoint(tile.width(), tile.height()))
-        menu.popup(QPoint(anchor.x() + 4, anchor.y() - menu.height()))
 
     def _setup_top_logo(self, path: str):
         try:
@@ -442,34 +421,11 @@ class UninstallerWindow(FramelessWindow):
         except Exception as e:
             print(f"Top logo setup warning: {e}")
 
-    def _change_language(self):
-        dlg = LanguageDialog(self)
-        if dlg.exec():
-            new_lang = dlg.chosen
-            if new_lang and new_lang != current_lang():
-                set_lang(new_lang)
-                self._save_settings_merged(language=new_lang)
-                HOTSDialog.info(self, T("lang_title"), T("lang_restart_msg"))
-
-    def _change_accent_color(self):
-        current_accent = self._settings.get("accent_color", DEFAULT_ACCENT)
-        current_theme = self._settings.get("theme", "dark")
-        dlg = AccentColorDialog(self, current_accent=current_accent, current_theme=current_theme)
-        if dlg.exec():
-            theme_changed = (
-                (dlg.chosen_accent and dlg.chosen_accent != current_accent) or
-                (dlg.chosen_theme and dlg.chosen_theme != current_theme)
-            )
-            if not theme_changed:
-                return
-
-            self._save_settings_merged(
-                accent_color=dlg.chosen_accent or current_accent,
-                theme=dlg.chosen_theme or current_theme,
-            )
-
-            if HOTSDialog.restart_prompt(self, T("app_title"), T("app_restart_msg")):
-                self._restart_app()
+    def _change_language(self, code: str):
+        if code and code != current_lang():
+            set_lang(code)
+            self._save_settings_merged(language=code)
+            HOTSDialog.info(self, T("lang_title"), T("lang_restart_msg"))
 
     def _restart_app(self):
         import sys
@@ -485,12 +441,7 @@ class UninstallerWindow(FramelessWindow):
                 app.setQuitOnLastWindowClosed(prev_quit_on_last)
             return
 
-        # KEY: release the single-instance mutex EXPLICITLY before spawning the new
-        # process instead of relying on the OS to release it when this process exits.
-        # Otherwise the new instance can start while the old one is still shutting down
-        # (e.g. waiting for background threads), see the mutex as taken, assume 'already
-        # running' and exit immediately, so the restart looks like the program just
-        # vanished.
+        # Release the single-instance mutex explicitly before spawning, or the new instance may see it taken and exit.
         try:
             main_mod = sys.modules.get("__main__")
             release_fn = getattr(main_mod, "release_single_instance_lock", None)
@@ -510,10 +461,7 @@ class UninstallerWindow(FramelessWindow):
             if is_frozen:
                 ok = QProcess.startDetached(python, args)
             else:
-                # When running from source, the launcher .pyw must be started (not the
-                # hots_uninstaller module via -m): it owns the single-instance mutex and
-                # the UAC elevation, so skipping it would leave the restarted instance
-                # without them.
+                # From source, start the launcher .pyw, not -m: it owns the single-instance mutex and the UAC elevation.
                 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                 launcher = os.path.join(base_dir, "hots_uninstaller_launcher.pyw")
                 pythonw = python
@@ -533,6 +481,14 @@ class UninstallerWindow(FramelessWindow):
 
         if app is not None:
             app.quit()
+
+    def _apply_live_glow(self, value: int):
+        set_live_glow(value)
+        self.refresh_live_appearance()
+
+    def _apply_live_transparency(self, value: int):
+        set_live_transparency(value)
+        self.refresh_live_appearance()
 
     def _save_settings_merged(self, **kwargs) -> bool:
         fresh = load_settings()

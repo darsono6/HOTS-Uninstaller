@@ -35,11 +35,7 @@ class HoverHelpDelegateMixin:
     def _init_hover_help(self, hover_alpha: float = 0.10):
         self._help_icon = colored_svg_icon(FIF.HELP, DARK["fg2"], sizes=(13,))
 
-        # NOTE: accent_rgba() returns a CSS "rgba(r,g,b,a)" string. It works in
-        # stylesheets (setStyleSheet), but QColor(...) in Python does not parse that
-        # format and silently creates an invalid, black color. So the QColor is built
-        # here directly from the components, so that the highlight is really in the
-        # accent color.
+        # QColor cannot parse the CSS rgba() string from accent_rgba(), so it is built from the accent color directly.
         self._hover_bg = QColor(DARK["accent"])
         self._hover_bg.setAlphaF(hover_alpha)
 

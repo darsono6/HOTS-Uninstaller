@@ -33,8 +33,7 @@ from .. import core_uninstall as cu
 
 @contextlib.contextmanager
 def _faulthandler_paused():
-    # The native Windows file dialog raises and handles RPC_E_WRONG_THREAD
-    # internally; faulthandler would log it as a fatal exception.
+    # The native file dialog raises RPC_E_WRONG_THREAD internally; faulthandler would log it as fatal.
     was_enabled = faulthandler.is_enabled()
     if was_enabled:
         faulthandler.disable()
@@ -107,11 +106,7 @@ class _CompareSignals(QObject):
 
 
 class _InstallWaitSignals(QObject):
-    # Carries the run token. The slot is a QObject method (not a lambda): only
-    # then does Qt guarantee execution in the GUI thread. With a lambda, a
-    # signal emitted from a worker thread could run _finish_monitoring outside
-    # the GUI thread (widget changes from a foreign thread), which ended in
-    # silent unresponsiveness.
+    # The slot must be a QObject method, not a lambda, so that Qt runs it in the GUI thread.
     done = Signal(int)
     failed = Signal(int)
     settling = Signal(int)
@@ -276,13 +271,8 @@ _DRAGDROP_E_NOTREGISTERED = 0x80040100
 
 
 def _revoke_ole_drop_target(hwnd: int) -> int:
-    # Revokes the OLE drop target that Qt registers on the window as soon as ANY
-    # widget accepts drops (QLineEdit does by default). While the window has an
-    # OLE target, Explorer tries ONLY OLE; that path is blocked across privilege
-    # levels, so neither the drop event nor WM_DROPFILES reaches the window.
-    # Without an OLE target, Explorer falls back to WM_DROPFILES (the window has
-    # DragAcceptFiles). This is done only for an elevated process, where OLE
-    # doesn't work anyway. Returns an HRESULT (0 = revoked).
+    # Revokes the OLE drop target Qt registers once any widget accepts drops: with an OLE target, Explorer skips
+    # WM_DROPFILES, and OLE drops are blocked across privilege levels (only done for an elevated process).
     ole32 = ctypes.windll.ole32
     ole32.RevokeDragDrop.argtypes = [wintypes.HWND]
     ole32.RevokeDragDrop.restype = ctypes.c_long
@@ -369,7 +359,7 @@ class MonitorPage(HOTSPage):
             settings = load_settings()
             self._snapshot_estimate = max(0, int(settings.get("monitor_snapshot_items", 0)))
             self._settle_estimate = max(0.0, float(settings.get("monitor_settle_seconds", 0)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             self._snapshot_estimate = 0
             self._settle_estimate = 0.0
         self._saved_app_name = ""
@@ -386,7 +376,7 @@ class MonitorPage(HOTSPage):
 
     def _card_style(self) -> str:
         return (f"background: {DARK['panel_bg']}; "
-                f"border: 1px solid {DARK['border_faint']}; border-radius: 6px;")
+                f"border: 1px solid {DARK['border_faint']}; border-radius: 8px;")
 
     def _build(self):
         cl = self.content_layout
@@ -419,7 +409,7 @@ class MonitorPage(HOTSPage):
         self.table.setTextElideMode(Qt.ElideMiddle)
         self.table.setStyleSheet(
             f"QTableWidget {{ background-color: {DARK['table_bg']}; alternate-background-color: {DARK['table_alt_bg']}; "
-            f"color: {DARK['fg']}; border: 1px solid {DARK['border_soft']}; border-radius: 6px; }}"
+            f"color: {DARK['fg']}; border: 1px solid {DARK['border_soft']}; border-radius: 8px; }}"
             f"QTableWidget::item {{ background-color: transparent; border-bottom: 1px solid {DARK['border_faint']}; padding: 2px 6px; }}"
             f"QTableWidget::item:selected {{ background-color: {accent_rgba(0.10)}; color: {DARK['fg']}; }}"
             f"QHeaderView::section {{ background-color: {DARK['header_bg']}; color: {DARK['fg2']}; "
@@ -925,6 +915,7 @@ class MonitorPage(HOTSPage):
                 font = header_item.font()
                 font.setBold(True)
                 header_item.setFont(font)
+                header_item.setForeground(QColor(DARK["accent"]))
                 self.table.setItem(row, 0, header_item)
                 self.table.setSpan(row, 0, 1, 3)
                 row += 1

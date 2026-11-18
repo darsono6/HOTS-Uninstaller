@@ -41,9 +41,6 @@ jobs:
             --include-data-files="hots_uninstaller/graphic/support_me_on_kofi_dark.png=graphic/support_me_on_kofi_dark.png" `
             --include-package-data=certifi `
             --enable-plugin=pyside6 `
-            --nofollow-import-to=PIL `
-            --nofollow-import-to=scipy `
-            --nofollow-import-to=colorthief `
             hots_uninstaller_launcher.pyw
 
       - name: Install Inno Setup

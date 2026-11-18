@@ -1,19 +1,59 @@
 import ctypes
 import ctypes.wintypes as wt
+import random
+import struct
 import sys
 from typing import Optional
 
 from PySide6.QtCore import (
-    Qt, QEvent, QPoint, QPointF, QSize, QAbstractAnimation, QEasingCurve,
-    QPropertyAnimation, QTimer, Signal,
+    Qt, QEvent, QPoint, QPointF, QRectF, QSize, QAbstractAnimation, QEasingCurve,
+    QPropertyAnimation, QTimer, QVariantAnimation, Signal,
 )
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
+from PySide6.QtGui import (
+    QBrush, QColor, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+    QRadialGradient, QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractScrollArea, QFrame, QHBoxLayout, QLabel, QLayout,
     QStackedWidget, QWidget,
 )
 
-from .constants import IS_LIGHT_THEME
+from . import constants as _constants
+from .constants import DARK, EFFECTS, IS_LIGHT_THEME, MATERIAL
+
+_NOISE_SIZE = 128
+_noise_cache = None
+
+
+def _noise_tile() -> QImage:
+    global _noise_cache
+    if _noise_cache is None:
+        rnd = random.Random(7)
+        buf = bytearray()
+        for _ in range(_NOISE_SIZE * _NOISE_SIZE):
+            vals = [int(rnd.random() * 771) for _ in range(4)]
+            buf += struct.pack("=4H", *vals)
+        _noise_cache = QImage(bytes(buf), _NOISE_SIZE, _NOISE_SIZE, _NOISE_SIZE * 8,
+                              QImage.Format_RGBA64_Premultiplied).copy()
+    return _noise_cache
+
+
+def _glow_image(w: int, h: int, color: QColor, strength: float) -> QImage:
+    grad = QRadialGradient(QPointF(w * 0.75, 0), max(w, h) * 0.85)
+    steps = 16
+    for i in range(steps + 1):
+        t = i / steps
+        stop = QColor(color)
+        stop.setAlphaF(strength * (1.0 - t) ** 2)
+        grad.setColorAt(t, stop)
+    img = QImage(w, h, QImage.Format_RGBA64_Premultiplied)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.fillRect(img.rect(), grad)
+    p.setCompositionMode(QPainter.CompositionMode_Plus)
+    p.fillRect(img.rect(), QBrush(_noise_tile()))
+    p.end()
+    return img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
 
 IS_WIN = sys.platform == "win32"
 
@@ -283,7 +323,7 @@ class _Native:
         self.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v))
 
     def apply_effects(self, hwnd: int, dark: bool, mica: bool, build: int,
-                      initial: bool = False) -> None:
+                      initial: bool = False, backdrop: int = 2) -> None:
         if initial or not mica:
             self._extend_frame(hwnd, -1, -1, -1, -1)
         if not mica:
@@ -302,7 +342,7 @@ class _Native:
         if build < 22523:
             self._set_dwm_attr(hwnd, 1029, 1)
         else:
-            self._set_dwm_attr(hwnd, 38, 2)
+            self._set_dwm_attr(hwnd, 38, backdrop)
         self._set_dwm_attr(hwnd, 20, 1 if dark else 0)
 
     def taskbar_autohide_edge(self, hwnd: int) -> Optional[str]:
@@ -332,7 +372,7 @@ _native: Optional[_Native] = None
 if IS_WIN:
     try:
         _native = _Native()
-    except Exception as _e:  # pragma: no cover - tylko Windows
+    except Exception as _e:  # pragma: no cover
         print(f"Frameless: native init failed: {_e}")
 
 
@@ -401,6 +441,25 @@ class PageStack(QFrame):
         self.view = _PopUpStack(self)
         lay.addWidget(self.view)
         self.view.currentChanged.connect(self.currentChanged)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        w, h = self.width(), self.height()
+        if w < 24 or h < 24:
+            return
+        r = 10.0
+        path = QPainterPath(QPointF(0.5, h))
+        path.lineTo(0.5, r)
+        path.arcTo(QRectF(0.5, 0.5, 2 * r, 2 * r), 180, -90)
+        path.lineTo(w, 0.5)
+        rim = QLinearGradient(0, 0, w * 0.55, h * 0.55)
+        rim.setColorAt(0.0, QColor(255, 255, 255, 255 if IS_LIGHT_THEME else 110))
+        rim.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QBrush(rim), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
 
     def setAnimationEnabled(self, enabled: bool):
         self.view.setAnimationEnabled(enabled)
@@ -592,7 +651,19 @@ class FramelessWindow(QWidget):
         self._good_px = None
         self._was_max = False
         self._in_sizemove = False
-        self._mica = bool(IS_WIN and sys.getwindowsversion().build >= 22000)
+        self._mica = bool(IS_WIN and EFFECTS and sys.getwindowsversion().build >= 22000)
+        self._glow_key = None
+        self._glow_img = None
+        self._glow_ready = False
+        self._base_a = None
+        self._base_anim = QVariantAnimation(self)
+        self._base_anim.setDuration(160)
+        self._base_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._base_anim.valueChanged.connect(self._on_base_value)
+        self._glow_timer = QTimer(self)
+        self._glow_timer.setSingleShot(True)
+        self._glow_timer.setInterval(90)
+        self._glow_timer.timeout.connect(self._on_glow_timer)
 
         self.hBoxLayout = QHBoxLayout(self)
         self.hBoxLayout.setSpacing(0)
@@ -612,6 +683,23 @@ class FramelessWindow(QWidget):
         self.stackedWidget.currentChanged.connect(lambda _i: self._guard_size_soon())
 
         QShortcut(QKeySequence(Qt.Key_F11), self, activated=self.toggleFullscreenMode)
+
+    def _base_target(self) -> float:
+        return _constants.ACRYLIC_BASE_ALPHA if self.isActiveWindow() else 1.0
+
+    def _on_base_value(self, value):
+        self._base_a = float(value)
+        self.update()
+
+    def _on_glow_timer(self):
+        self._glow_ready = True
+        self.update()
+
+    def refresh_live_appearance(self):
+        if MATERIAL == "acrylic":
+            self._base_anim.stop()
+            self._base_a = self._base_target()
+        self.update()
 
     def switchTo(self, page: QWidget):
         self.stackedWidget.setCurrentWidget(page, popOut=False)
@@ -658,11 +746,6 @@ class FramelessWindow(QWidget):
             self.showMaximized()
 
     def restoreFromMaximized(self):
-        """Restores a maximized window. The state according to Windows can disagree
-        with the state in Qt (then showNormal() does nothing), so after a moment
-        IsZoomed is checked and, if needed, Windows is told to restore the window
-        directly.
-        """
         self.showNormal()
         QTimer.singleShot(80, self._force_restore)
 
@@ -687,11 +770,43 @@ class FramelessWindow(QWidget):
         self.titleBar.sync_maximized()
 
     def paintEvent(self, e):
-        if self._mica:
-            return
-        bg = QColor(240, 244, 249) if IS_LIGHT_THEME else QColor(32, 32, 32)
         p = QPainter(self)
-        p.fillRect(self.rect(), bg)
+        if self._mica:
+            p.setCompositionMode(QPainter.CompositionMode_Source)
+            p.fillRect(self.rect(), Qt.transparent)
+            p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            if MATERIAL == "acrylic":
+                if self._base_a is None:
+                    self._base_a = self._base_target()
+                base = QColor(240, 244, 249) if IS_LIGHT_THEME else QColor(32, 32, 32)
+                base.setAlphaF(self._base_a)
+                p.fillRect(self.rect(), base)
+        else:
+            p.fillRect(self.rect(), QColor(240, 244, 249) if IS_LIGHT_THEME else QColor(32, 32, 32))
+        if not EFFECTS:
+            return
+        w, h = self.width(), self.height()
+        if w < 1 or h < 1:
+            return
+        x = _constants.GLOW / 100
+        strength = 0.18 * (1.0 - (1.0 - x) ** 2)
+        color = QColor(DARK["accent"])
+        strength *= min(1.0, color.saturationF() * 4.0)
+        if strength < 0.002:
+            return
+        if IS_LIGHT_THEME:
+            color = QColor((color.red() + 255) // 2, (color.green() + 255) // 2, (color.blue() + 255) // 2)
+            strength = min(1.0, strength * 1.8)
+        dpr = self.devicePixelRatioF()
+        pw, ph = max(1, round(w * dpr)), max(1, round(h * dpr))
+        key = (pw, ph, color.rgb(), strength)
+        if self._glow_img is None or (key != self._glow_key and self._glow_ready):
+            self._glow_img = _glow_image(pw, ph, color, strength)
+            self._glow_key = key
+            self._glow_ready = False
+        elif key != self._glow_key and not self._glow_timer.isActive():
+            self._glow_timer.start()
+        p.drawImage(QRectF(0, 0, w, h), self._glow_img)
 
     def isMaximizedNative(self) -> bool:
         if IS_WIN and _native is not None:
@@ -702,12 +817,8 @@ class FramelessWindow(QWidget):
         return self.isMaximized()
 
     def _init_native(self):
-        # Windows: a regular window without a title-bar background
-        # (NoTitleBarBackgroundHint, Qt >= 6.10), with the system frame removed via
-        # WM_NCCALCSIZE. With FramelessWindowHint on Qt 6.11 Mica, shadow and animations
-        # did not work although the DWM calls succeeded (verified with a diagnostic
-        # log). Where the flag is missing (older Qt) and outside Windows,
-        # FramelessWindowHint stays.
+        # Windows: a regular window without a title-bar background and with the system frame removed via WM_NCCALCSIZE;
+        # FramelessWindowHint broke Mica, shadow and animations on Qt 6.11.
         hint = getattr(Qt, "NoTitleBarBackgroundHint", None)
         if IS_WIN and hint is not None:
             self.setWindowFlags((self.windowFlags() & ~Qt.FramelessWindowHint) | Qt.Window | hint)
@@ -724,11 +835,6 @@ class FramelessWindow(QWidget):
             print(f"Frameless init warning: {e}")
 
     def _apply_native(self, initial: bool = False):
-        """Window styles + DWM effects. Idempotent, so it is safe to call repeatedly:
-        in the constructor, when the window is shown, right after, and on
-        activation. Qt can overwrite the styles and the extended frame even after
-        showEvent (documented since Qt 6.8).
-        """
         if not IS_WIN or _native is None:
             return
         try:
@@ -738,7 +844,8 @@ class FramelessWindow(QWidget):
             if not self._fullscreen_mode:
                 _native.enforce_style(hwnd)
             _native.apply_effects(hwnd, dark=not IS_LIGHT_THEME, mica=self._mica,
-                                  build=_WIN_BUILD, initial=initial)
+                                  build=_WIN_BUILD, initial=initial,
+                                  backdrop=3 if MATERIAL == "acrylic" else 2)
         except Exception as e:
             print(f"Frameless native warning: {e}")
 
@@ -764,8 +871,14 @@ class FramelessWindow(QWidget):
                     _native.enforce_style(int(self.winId()))
                 except Exception:
                     pass
-        elif t == QEvent.ActivationChange and self.isActiveWindow():
-            self._apply_native()
+        elif t == QEvent.ActivationChange:
+            if MATERIAL == "acrylic":
+                self._base_anim.stop()
+                self._base_anim.setStartValue(self._base_a if self._base_a is not None else 1.0)
+                self._base_anim.setEndValue(self._base_target())
+                self._base_anim.start()
+            if self.isActiveWindow():
+                self._apply_native()
 
     def _is_normal_native(self, hwnd: int) -> bool:
         return not (self._fullscreen_mode or _native.is_maximized(hwnd) or self.isMinimized())
@@ -868,9 +981,6 @@ class FramelessWindow(QWidget):
             return True, 0
 
         if msg.message == WM_STYLECHANGING:
-            # Qt (or someone else) tries to change the window style: its intent is
-            # corrected on the fly so WANTED_STYLE never disappears. Full screen is left
-            # alone.
             if not self._fullscreen_mode and (msg.wParam & 0xFFFFFFFF) == 0xFFFFFFF0:
                 ss = ctypes.cast(msg.lParam, ctypes.POINTER(_STYLESTRUCT)).contents
                 ss.styleNew = enforce_style_bits(ss.styleNew)

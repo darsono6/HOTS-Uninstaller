@@ -5,6 +5,7 @@ import subprocess
 import winreg
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Optional
 
 from .constants import load_settings, save_settings
@@ -87,12 +88,7 @@ _PS_APPX_INSTALL_LOCATIONS_CMD = (
 
 
 def _run_powershell(command: str, timeout: int = 30) -> tuple[bool, str]:
-    # Force UTF-8 on both sides: PowerShell writes redirected (non-console) stdout in a
-    # code-page dependent encoding, while subprocess.run(text=True) decodes with the
-    # local default (e.g. cp1250 on Polish Windows). With non-ASCII names (e.g. from
-    # Get-StartApps) this raised UnicodeDecodeError inside the subprocess reader thread,
-    # which the try/except below does NOT catch, so the call silently returned
-    # empty/truncated data.
+    # Force UTF-8: a code-page mismatch raised UnicodeDecodeError in the reader thread, outside the try/except.
     wrapped = (
         "$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
         + command
@@ -166,11 +162,9 @@ class AppxApp:
     size_kb: int = 0
     installed_for: list = field(default_factory=list)
     signature_kind: str = ""
-    # True only when Get-StartApps returned any data. Without it an empty friendly_name
-    # means 'unknown' (the call failed or hung), not 'the package has no tile', so
-    # nothing may be hidden because of it.
     start_apps_known: bool = False
     manifest_name: str = ""
+    install_date: Optional[date] = None
 
     @property
     def display_name(self) -> str:
@@ -270,9 +264,6 @@ class AppxApp:
 
     @property
     def size_display(self) -> str:
-        # Same formatting logic as ProgramInfo.size_display in core_uninstall.py (KB ->
-        # MB/GB), deliberately duplicated instead of imported to avoid a module-level
-        # circular import (core_uninstall already imports from core_appx).
         kb = self.size_kb
         if kb <= 0:
             return "—"
@@ -360,8 +351,7 @@ def get_appx_install_locations() -> Optional[dict]:
 
 
 def _appx_dir_size_kb(path: str, limit_files: int = 200000) -> int:
-    # Import inside the function: core_uninstall imports from core_appx at module level,
-    # so the reverse import must be lazy (as in the rest of this file).
+    # Lazy import: core_uninstall imports core_appx at module level.
     from .core_uninstall import _scan_dir_bytes
 
     try:
@@ -374,6 +364,21 @@ def _appx_dir_size_kb(path: str, limit_files: int = 200000) -> int:
     if incomplete and kb < 1024:
         return 0
     return kb
+
+
+def _appx_install_date(pfn: str, loc: str) -> Optional[date]:
+    candidates = []
+    local = os.environ.get("LOCALAPPDATA")
+    if local and pfn:
+        candidates.append(os.path.join(local, "Packages", pfn))
+    if loc:
+        candidates.append(loc)
+    for path in candidates:
+        try:
+            return datetime.fromtimestamp(os.stat(path).st_ctime).date()
+        except OSError:
+            continue
+    return None
 
 
 def list_appx_apps(all_users: bool = False) -> list[AppxApp]:
@@ -432,13 +437,12 @@ def list_appx_apps(all_users: bool = False) -> list[AppxApp]:
                 installed_for=[str(x) for x in installed_for if x],
                 signature_kind=entry.get("SignatureKind") or "",
                 start_apps_known=bool(friendly_names),
+                install_date=_appx_install_date(pfn, loc),
             ))
         except Exception:
             continue
 
-    # Reload settings right before saving: the loop above can run long (package folder
-    # scan) and other parts of the program (theme, language, collapsed groups) may save
-    # their changes meanwhile; writing back a stale copy would revert them.
+    # Reload before saving: the scan above is slow and other settings may have changed meanwhile.
     settings = load_settings()
     settings["appx_size_cache_v3"] = new_cache
     save_settings(settings)
@@ -504,9 +508,6 @@ def open_registry_key(app: "AppxApp") -> bool:
         return False
     hive, subkey = found
     hive_name = "HKEY_LOCAL_MACHINE" if hive == winreg.HKEY_LOCAL_MACHINE else "HKEY_CURRENT_USER"
-    # NOTE: no "Computer\" prefix. It is only shown in regedit's address bar and is NOT
-    # the format expected by the LastKey value (that prefix was why navigation did not
-    # work at all).
     target = f"{hive_name}\\{subkey}"
     try:
         with winreg.CreateKey(
@@ -516,9 +517,6 @@ def open_registry_key(app: "AppxApp") -> bool:
     except OSError:
         pass
     try:
-        # "/m" (undocumented regedit switch) opens a NEW independent instance instead of
-        # just raising an already open window; without it, if Registry Editor was
-        # already open, LastKey would be written but ignored.
         popen_no_busy_cursor(["regedit.exe", "/m"])
         return True
     except Exception:
@@ -603,13 +601,7 @@ def _remove_package_full_name(package_full_name: str, all_users: bool) -> tuple[
     scope = " -AllUsers" if all_users else ""
     ok, out = _run_powershell(f"Remove-AppxPackage -Package '{quoted}'{scope}", timeout=60)
     if not ok and all_users:
-        # Observed on a Windows 10 VM: removing ANY Store package failed with 0x80070002
-        # under -AllUsers, while the same code works on a regular Windows 11 machine.
-        # The AllUsers store can hold orphaned references to user profiles that no
-        # longer exist (typical for cloned VM images), which breaks 'for all users'
-        # removal even though removal for the current user alone is possible. So retry
-        # once in the narrower mode; at worst the user gets the same (sanitized) error
-        # from the first attempt.
+        # -AllUsers can fail with 0x80070002 on orphaned user profiles; retry for the current user only.
         ok2, out2 = _run_powershell(f"Remove-AppxPackage -Package '{quoted}'", timeout=60)
         if ok2:
             return True, ""

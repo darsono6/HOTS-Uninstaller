@@ -16,8 +16,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
+from .constants import load_settings, save_settings
 from .i18n import T
 from .proc_utils import launch_deelevated, popen_no_busy_cursor, system_exe
+from .resource_utils import get_base_dir
 
 _UNINSTALL_SUBKEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
 _UNINSTALL_SUBKEY_WOW64 = r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -64,6 +66,92 @@ def _msi_product_property(product_code: str, prop_name: str) -> str:
             return ""
         return buf.value or ""
     except Exception:
+        return ""
+
+
+_GUID_RE = re.compile(r"\{[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}")
+
+
+def _pack_guid(guid: str) -> str:
+    g = guid.strip("{}").replace("-", "").upper()
+    return g[0:8][::-1] + g[8:12][::-1] + g[12:16][::-1] + "".join(g[i:i + 2][::-1] for i in range(16, 32, 2))
+
+
+def _build_msi_component_index() -> dict:
+    index: dict = {}
+    base = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData"
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base, 0, winreg.KEY_READ) as users:
+            sids = []
+            i = 0
+            while True:
+                try:
+                    sids.append(winreg.EnumKey(users, i))
+                except OSError:
+                    break
+                i += 1
+    except OSError:
+        return index
+    for sid in sids:
+        try:
+            comps = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base + "\\" + sid + "\\Components", 0, winreg.KEY_READ)
+        except OSError:
+            continue
+        with comps:
+            i = 0
+            while True:
+                try:
+                    name = winreg.EnumKey(comps, i)
+                except OSError:
+                    break
+                i += 1
+                try:
+                    with winreg.OpenKey(comps, name, 0, winreg.KEY_READ) as ck:
+                        j = 0
+                        while True:
+                            try:
+                                product, data, _t = winreg.EnumValue(ck, j)
+                            except OSError:
+                                break
+                            j += 1
+                            if isinstance(data, str) and data[1:3] == ":\\":
+                                index.setdefault(product.upper(), []).append(data)
+                except OSError:
+                    continue
+    return index
+
+
+def _msi_dir_from_components(index: dict, product_code: str) -> str:
+    if not _GUID_RE.fullmatch(product_code or ""):
+        return ""
+    paths = index.get(_pack_guid(product_code))
+    if not paths:
+        return ""
+    containers = []
+    for env in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData", "LOCALAPPDATA", "APPDATA"):
+        v = os.environ.get(env)
+        if v:
+            containers.append(os.path.normcase(os.path.normpath(v)))
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        containers.append(os.path.normcase(os.path.normpath(os.path.join(local, "Programs"))))
+    groups: dict = {}
+    for path in paths:
+        folder = os.path.dirname(path)
+        norm = os.path.normcase(os.path.normpath(folder))
+        best = max((c for c in containers if norm.startswith(c + os.sep)), key=len, default="")
+        if not best:
+            continue
+        first = norm[len(best) + 1:].split(os.sep, 1)[0]
+        if first in ("common files", "microsoft", "windowsapps"):
+            continue
+        groups.setdefault(best + os.sep + first, []).append(folder)
+    if not groups:
+        return ""
+    folders = max(groups.values(), key=len)
+    try:
+        return os.path.commonpath(folders)
+    except ValueError:
         return ""
 
 
@@ -116,12 +204,7 @@ def _decode_console_bytes(data: bytes) -> str:
     except Exception:
         return data.decode("utf-8", errors="replace")
 
-# Folders that must NEVER be touched when scanning/removing leftovers: protection
-# against accidentally deleting the system (e.g. a badly written installer put the whole
-# "Program Files" in InstallLocation instead of the product subfolder; see install_loc
-# in scan_leftovers). The C:\... set is only a FALLBACK for missing environment
-# variables; the real protection is built dynamically in _protected_dir_set() below, so
-# it also works when Windows is installed on a drive other than C:.
+# Never touch these when scanning or removing leftovers; the real protection is built in _protected_dir_set().
 _PROTECTED_DIRS = {
     r"c:\windows", r"c:\windows\system32", r"c:\windows\syswow64",
     r"c:\program files", r"c:\program files (x86)", r"c:\programdata", r"c:\users",
@@ -234,6 +317,7 @@ class InstalledApp:
     has_parent: bool = False
     no_remove: bool = False
     install_source: str = ""
+    is_own: bool = False
 
     @property
     def uid(self) -> str:
@@ -373,6 +457,12 @@ def _extract_exe_path(cmd: str) -> str:
     return os.path.normpath(exe) if exe else exe
 
 
+def _is_own_app(app: InstalledApp) -> bool:
+    own = _norm_path(get_base_dir())
+    exe = _extract_exe_path(app.uninstall_string)
+    return own in (_norm_path(app.install_location), _norm_path(os.path.dirname(exe) if exe else ""))
+
+
 def _resolve_bare_command(name: str) -> str:
     sysroot = os.environ.get("SystemRoot", r"C:\Windows")
     dirs = [os.path.join(sysroot, "System32"), sysroot]
@@ -405,6 +495,11 @@ def list_installed_apps(include_system: bool = False) -> list[InstalledApp]:
     results: list[InstalledApp] = []
     seen_uids = set()
     _install_dir_index_cache = []
+    _msi_component_index_cache = []
+    saved_locations = load_settings().get("msi_locations")
+    msi_locations = {k: v for k, v in saved_locations.items() if isinstance(k, str) and isinstance(v, str)} \
+        if isinstance(saved_locations, dict) else {}
+    msi_locations_changed = False
 
     def _install_dir_index() -> dict:
         if not _install_dir_index_cache:
@@ -442,18 +537,13 @@ def list_installed_apps(include_system: bool = False) -> list[InstalledApp]:
                         release_type = _reg_get_str(k, "ReleaseType")
                         parent_key = _reg_get_str(k, "ParentKeyName")
                         is_update = release_type.lower() in ("hotfix", "security update", "update")
-                        # NoRemove=1 is Windows' own signal that the entry is
-                        # informational and cannot be uninstalled from the UI. Some
-                        # programs (e.g. ESET antivirus) set it DELIBERATELY despite
-                        # having a working UninstallString, to discourage deleting the
-                        # registry key as a shortcut and force their own uninstaller. So
-                        # NoRemove does not mean "nothing can be done"; it is evaluated
-                        # below, after uninstall_string/quiet_uninstall_string are read.
                         no_remove_flag = _reg_get_int(k, "NoRemove") == 1
 
                         install_location = _reg_get_str(k, "InstallLocation")
                         if install_location:
                             install_location = os.path.expandvars(install_location).strip().strip('"')
+                            if _is_unusable_install_dir(install_location):
+                                install_location = ""
                         uninstall_string = _reg_get_str(k, "UninstallString")
                         quiet_uninstall_string = _reg_get_str(k, "QuietUninstallString")
                         no_remove = no_remove_flag and not (uninstall_string or quiet_uninstall_string)
@@ -461,7 +551,7 @@ def list_installed_apps(include_system: bool = False) -> list[InstalledApp]:
                         if not install_location:
                             exe_path = _extract_exe_path(uninstall_string or quiet_uninstall_string)
                             candidate = os.path.dirname(exe_path) if exe_path else ""
-                            if candidate and os.path.isdir(candidate):
+                            if candidate and os.path.isdir(candidate) and not _is_unusable_install_dir(candidate):
                                 install_location = candidate
 
                         is_windows_installer = _reg_get_int(k, "WindowsInstaller") == 1
@@ -469,22 +559,27 @@ def list_installed_apps(include_system: bool = False) -> list[InstalledApp]:
                             msi_loc = _msi_product_property(key_name, "InstallLocation").strip().strip('"')
                             if msi_loc:
                                 msi_loc = os.path.expandvars(msi_loc)
-                            if msi_loc and os.path.isdir(msi_loc):
+                            if msi_loc and os.path.isdir(msi_loc) and not _is_unusable_install_dir(msi_loc):
                                 install_location = msi_loc
+                            if not install_location:
+                                cached = msi_locations.get(key_name)
+                                if cached and os.path.isdir(cached) and not _is_unusable_install_dir(cached):
+                                    install_location = cached
+                                elif cached is None or cached:
+                                    if not _msi_component_index_cache:
+                                        _msi_component_index_cache.append(_build_msi_component_index())
+                                    comp_loc = _msi_dir_from_components(_msi_component_index_cache[0], key_name)
+                                    if comp_loc and os.path.isdir(comp_loc) and not _is_unusable_install_dir(comp_loc):
+                                        install_location = comp_loc
+                                    msi_locations[key_name] = install_location
+                                    msi_locations_changed = True
 
                         if not install_location and display_name:
                             guessed = _install_dir_index().get(_normalize_folder_name(display_name))
-                            if guessed:
+                            if guessed and not _is_unusable_install_dir(guessed):
                                 install_location = guessed
 
-                        if install_location and _is_protected_dir(install_location):
-                            # Safety fuse: whatever the source (raw InstallLocation, a
-                            # guess from UninstallString, the MSI cache, a guess from
-                            # the folder name), if the "whole installation of the
-                            # program" turns out to be e.g. C:\Windows\System32, it is
-                            # certainly an installer mistake. Without this it gave
-                            # absurd sizes (e.g. "8 GB") and allowed opening a system
-                            # folder through "Open location".
+                        if install_location and _is_unusable_install_dir(install_location):
                             install_location = ""
 
                         estimated_size_kb = _reg_get_int(k, "EstimatedSize")
@@ -518,6 +613,7 @@ def list_installed_apps(include_system: bool = False) -> list[InstalledApp]:
                         if app.uid in seen_uids:
                             continue
                         seen_uids.add(app.uid)
+                        app.is_own = _is_own_app(app)
                         results.append(app)
                 except OSError:
                     continue
@@ -525,6 +621,10 @@ def list_installed_apps(include_system: bool = False) -> list[InstalledApp]:
     if not include_system:
         results = [a for a in results if not a.is_component]
 
+    if msi_locations_changed:
+        fresh = load_settings()
+        fresh["msi_locations"] = msi_locations
+        save_settings(fresh)
     results.sort(key=lambda a: (a.display_name or "").lower())
     return results
 
@@ -571,17 +671,8 @@ def run_uninstaller(app: InstalledApp, silent: bool = False) -> tuple[bool, str]
         return False, "no_uninstall_string"
 
     try:
-        # SECURITY: cmd is a ready command line from the registry
-        # (UninstallString/QuietUninstallString), also read from HKEY_CURRENT_USER,
-        # which ANY process of the same user can write, even an unprivileged one. This
-        # program runs elevated, so shell=True was a real privilege-escalation path:
-        # cmd.exe interprets shell metacharacters (&, |, >, %VAR%), and a crafted HKCU
-        # entry could run ANY command as administrator. shell=False with cmd as a plain
-        # string (NOT a list!) bypasses cmd.exe entirely: Popen passes the string
-        # straight to CreateProcess as lpCommandLine, which splits it into file +
-        # arguments with the same quoting rules as list2cmdline, without any cmd.exe
-        # side effects. Expansion of %ProgramFiles%-like tokens, formerly done by
-        # cmd.exe, is done explicitly in build_uninstall_command.
+        # SECURITY: cmd comes from a registry value that any process of the same user can write, and this program runs elevated.
+        # shell=False with a plain string bypasses cmd.exe; %VAR% expansion is done in build_uninstall_command.
         subprocess.Popen(
             cmd,
             shell=False,
@@ -895,8 +986,6 @@ def force_remove_registry_entry(app: InstalledApp) -> tuple[bool, str, str]:
         [(app.hive, full_subkey, None)], app.display_name or app.key_name,
     )
     if failed:
-        # Without a saved backup the entry is not deleted: it could not be restored
-        # afterwards.
         return False, T("leftover_err_backup_failed", path=full_subkey,
                         error=next(iter(failed.values()))), ""
 
@@ -959,9 +1048,6 @@ def remove_ghost_with_leftovers(app: InstalledApp, items: "list[LeftoverItem]") 
 def open_registry_key(app: InstalledApp) -> bool:
     subkey = _UNINSTALL_SUBKEY_WOW64 if app.is_wow64 else _UNINSTALL_SUBKEY
     hive_name = _HIVE_FULL_NAMES.get(app.hive, "HKEY_LOCAL_MACHINE")
-    # NOTE: no "Computer\" prefix. It is only shown in regedit's address bar and is NOT
-    # the format expected by the LastKey value (that prefix was why navigation did not
-    # work at all).
     target = f"{hive_name}\\{subkey}\\{app.key_name}"
     try:
         with winreg.CreateKey(
@@ -971,9 +1057,6 @@ def open_registry_key(app: InstalledApp) -> bool:
     except OSError:
         pass
     try:
-        # "/m" (undocumented regedit switch) opens a NEW independent instance instead of
-        # just raising an already open window; without it, if Registry Editor was
-        # already open, LastKey would be written but ignored.
         popen_no_busy_cursor(["regedit.exe", "/m"])
         return True
     except Exception:
@@ -992,24 +1075,13 @@ class LeftoverItem:
     hive: int = 0
     subkey: str = ""
     value_name: str = ""
-    # Result of the backup step (set by backup_registry_keys_for_items): a registry
-    # entry whose backup could not be saved is NOT deleted.
     backup_failed: bool = field(default=False, compare=False)
     backup_error: str = field(default="", compare=False)
-    # A registry key at the "Software\<Name>" level whose name is a PUBLISHER, not a
-    # product (e.g. Corel for WinZip). It may hold data of other programs, so it is
-    # deleted only when empty. Keys named after the product (e.g. 7-Zip) are deleted
-    # entirely.
     shared_root: bool = field(default=False, compare=False)
     preselected: bool = field(default=False, compare=False)
-    # An item from the Installation Monitor log that has NOTHING linking it to this
-    # program (not in its folder, name does not match, key does not point to its files)
-    # may have landed in the log as background noise. It is shown but NEVER preselected
-    # (see _monitor_item_corroborated).
     uncertain: bool = field(default=False, compare=False)
-    # User data (browser profile: bookmarks, passwords); set together with `uncertain`
-    # by mark_user_data(), so it is never preselected.
     user_data: bool = field(default=False, compare=False)
+    source: str = field(default="", compare=False)
 
 
 _GENERIC_TOKENS = {
@@ -1152,6 +1224,11 @@ def _dir_size_kb(path: str, limit_files: int = _DIR_SIZE_FILE_LIMIT) -> int:
     if truncated:
         return 0
     return total // 1024
+
+
+def _is_unusable_install_dir(path: str) -> bool:
+    norm = os.path.normcase(os.path.normpath(path))
+    return _is_system_container(norm) or _is_under_windows_dir(norm) or norm in _protected_container_set()
 
 
 def _is_protected_dir(path: str) -> bool:
@@ -2042,12 +2119,6 @@ def _scan_folder_subtree(root: str, primary: str, app_tokens: set, depth: int,
 
 
 def _path_prefix_match(haystack_low: str, needle_low: str) -> bool:
-    """Substring check for paths with a boundary at the end of the match: needle must
-    end at a path segment boundary (backslash) or at the end of the string, NOT in
-    the middle of a longer folder name. A space is NOT a boundary, because real
-    paths contain it (e.g. "Program Files"). Without this, "...\\HOTS" would also
-    falsely match inside "...\\HOTS Hosts\\...".
-    """
     if not needle_low:
         return False
     start = 0
@@ -2088,10 +2159,6 @@ def _install_dir_candidates(app: "InstalledApp") -> list[str]:
         if norm in seen:
             continue
         seen.add(norm)
-        # A system folder (System32, Program Files, a drive root...) must NEVER be the
-        # root of path matching: otherwise a program with an icon from shell32.dll, or
-        # an uninstaller given as the full path to msiexec.exe, would match the
-        # MuiCache/Firewall/AppCompat entries of all system programs.
         if _is_protected_dir(c) or re.fullmatch(r"[A-Za-z]:", c):
             continue
         result.append(c)
@@ -2267,14 +2334,32 @@ def _drop_nested_folder_duplicates(items: list["LeftoverItem"]) -> list["Leftove
     return [it for i, it in enumerate(items) if i not in redundant_idx]
 
 
+_SOURCE_RANK = {"path": 0, "id": 0, "monitor": 1, "trace": 2, "name": 3}
+
+
+def _tagged(source: str, found) -> list:
+    found = list(found)
+    for it in found:
+        if not it.source:
+            it.source = source
+    return found
+
+
+def _upgrade_source(kept: "LeftoverItem", source: str) -> None:
+    if _SOURCE_RANK.get(source, 9) < _SOURCE_RANK.get(kept.source, 9):
+        kept.source = source
+
+
 def _dedupe_items(items: list["LeftoverItem"]) -> list["LeftoverItem"]:
     unique_items: list[LeftoverItem] = []
-    seen_item_keys: set = set()
+    kept_by_key: dict = {}
     for it in items:
         key = _item_key(it)
-        if key not in seen_item_keys:
-            seen_item_keys.add(key)
+        if key not in kept_by_key:
+            kept_by_key[key] = it
             unique_items.append(it)
+        else:
+            _upgrade_source(kept_by_key[key], it.source)
     return unique_items
 
 
@@ -2560,18 +2645,19 @@ def scan_leftovers(app: InstalledApp) -> list[LeftoverItem]:
         if norm not in seen_paths:
             seen_paths.add(norm)
             items.append(LeftoverItem(kind="folder", path=install_loc,
-                                       size_kb=_dir_size_kb(install_loc)))
+                                       size_kb=_dir_size_kb(install_loc), source="path"))
 
     for root in _candidate_folder_roots() if (primary and not primary_ambiguous) else []:
-        items.extend(_scan_folder_subtree(root, primary, app_tokens, depth=1, max_depth=2, seen_paths=seen_paths,
-                                          trusted_tokens=_trusted_parent_tokens(app, app_tokens),
-                                          allow_microsoft="microsoft" in _entry_match_tokens(app.publisher)))
+        items.extend(_tagged("name", _scan_folder_subtree(
+            root, primary, app_tokens, depth=1, max_depth=2, seen_paths=seen_paths,
+            trusted_tokens=_trusted_parent_tokens(app, app_tokens),
+            allow_microsoft="microsoft" in _entry_match_tokens(app.publisher))))
 
     items = _drop_nested_folder_duplicates(items)
 
     if primary and not primary_ambiguous:
-        items.extend(_scan_prefetch_leftovers(primary))
-        items.extend(_scan_shortcut_leftovers(primary, app_tokens))
+        items.extend(_tagged("name", _scan_prefetch_leftovers(primary)))
+        items.extend(_tagged("name", _scan_shortcut_leftovers(primary, app_tokens)))
 
     reg_search_roots = [
         (winreg.HKEY_CURRENT_USER, r"Software"),
@@ -2588,72 +2674,69 @@ def scan_leftovers(app: InstalledApp) -> list[LeftoverItem]:
 
     if match_tokens:
         for hive, base in reg_search_roots:
-            items.extend(_scan_registry_subtree(
+            items.extend(_tagged("name", _scan_registry_subtree(
                 hive, base, match_tokens, app_and_pub_tokens, depth=1, max_depth=2,
-                product_tokens={primary} if primary else None))
+                product_tokens={primary} if primary else None)))
         for hive, base in reg_classes_roots:
-            items.extend(_scan_registry_subtree(
-                hive, base, match_tokens, app_and_pub_tokens, depth=1, max_depth=1))
+            items.extend(_tagged("name", _scan_registry_subtree(
+                hive, base, match_tokens, app_and_pub_tokens, depth=1, max_depth=1)))
 
-    items.extend(_scan_ufh_shc_leftovers(app, primary, primary_ambiguous, app_tokens))
-    items.extend(_scan_registered_package_leftovers(app, primary, primary_ambiguous))
+    items.extend(_tagged("trace", _scan_ufh_shc_leftovers(app, primary, primary_ambiguous, app_tokens)))
+    items.extend(_tagged("id", _scan_registered_package_leftovers(app, primary, primary_ambiguous)))
 
     install_dirs_low = [d.lower() for d in _install_dir_candidates(app)]
     if install_dirs_low:
-        items.extend(_scan_firewall_rule_leftovers(install_dirs_low))
-        items.extend(_scan_run_leftovers(install_dirs_low))
-        items.extend(_scan_app_paths_leftovers(install_dirs_low))
-        items.extend(_scan_classes_by_location(install_dirs_low))
-        items.extend(_scan_path_named_value_leftovers(
-            winreg.HKEY_CURRENT_USER, _APPCOMPAT_STORE_SUBKEY, install_dirs_low))
+        items.extend(_tagged("path", _scan_firewall_rule_leftovers(install_dirs_low)))
+        items.extend(_tagged("path", _scan_run_leftovers(install_dirs_low)))
+        items.extend(_tagged("path", _scan_app_paths_leftovers(install_dirs_low)))
+        items.extend(_tagged("path", _scan_classes_by_location(install_dirs_low)))
+        items.extend(_tagged("path", _scan_path_named_value_leftovers(
+            winreg.HKEY_CURRENT_USER, _APPCOMPAT_STORE_SUBKEY, install_dirs_low)))
         for muicache_subkey in _MUICACHE_SUBKEYS:
-            items.extend(_scan_path_named_value_leftovers(
-                winreg.HKEY_CURRENT_USER, muicache_subkey, install_dirs_low))
-        items.extend(_scan_installer_folders_leftovers(install_dirs_low))
-    items.extend(_scan_tracing_leftovers(_remembered_exe_stems.get(app.uid, set())))
-    items.extend(_scan_prefetch_by_exe(_remembered_exe_stems.get(app.uid, set())))
+            items.extend(_tagged("path", _scan_path_named_value_leftovers(
+                winreg.HKEY_CURRENT_USER, muicache_subkey, install_dirs_low)))
+        items.extend(_tagged("path", _scan_installer_folders_leftovers(install_dirs_low)))
+    items.extend(_tagged("trace", _scan_tracing_leftovers(_remembered_exe_stems.get(app.uid, set()))))
+    items.extend(_tagged("trace", _scan_prefetch_by_exe(_remembered_exe_stems.get(app.uid, set()))))
     if primary and not primary_ambiguous:
-        items.extend(_scan_association_leftovers(primary))
+        items.extend(_tagged("name", _scan_association_leftovers(primary)))
 
-    if True:
-        seen_all = {_item_key(it) for it in items}
-        for it in list(_scan_msi_productcode_leftovers(app)) + _scan_installer_icon_cache(app):
-            key = _item_key(it)
-            if key not in seen_all:
-                seen_all.add(key)
-                items.append(it)
+    seen_all = {_item_key(it): it for it in items}
+    for it in _tagged("id", list(_scan_msi_productcode_leftovers(app)) + _scan_installer_icon_cache(app)):
+        key = _item_key(it)
+        if key not in seen_all:
+            seen_all[key] = it
+            items.append(it)
+        else:
+            _upgrade_source(seen_all[key], it.source)
 
     from . import core_monitor as _core_monitor
     log_entry = _core_monitor.find_monitor_log_for_app(app.display_name, app.key_name)
     if log_entry is not None:
-        seen_all = {_item_key(it) for it in items}
+        seen_all = {_item_key(it): it for it in items}
         for it in _core_monitor.load_monitor_log(log_entry.path):
             key = _item_key(it)
             if key not in seen_all:
-                seen_all.add(key)
+                seen_all[key] = it
                 if not _monitor_log_item_exists(it):
                     continue
                 it.uncertain = not _monitor_item_corroborated(
                     app, it, install_dirs_low, match_tokens)
+                it.source = "monitor"
                 items.append(it)
+            else:
+                _upgrade_source(seen_all[key], "monitor")
         promote_association_backups(items)
 
-    # Safety net: this program's OWN "Uninstall" registry key (see
-    # _is_own_uninstall_registration) must never land on the leftovers list, whichever
-    # source above proposed it. In practice this concerns the Monitor log: it records
-    # EVERY key added during the installation, including the program's own ARP
-    # registration, and without this filter it went straight onto the "to delete" list,
-    # although its existence just means the program has not really been uninstalled
-    # (yet).
     items = _dedupe_items(items)
 
     items = [it for it in items
              if not (it.kind == "registry" and _is_own_uninstall_registration(app, it.hive, it.subkey))]
 
     items = [it for it in items if not leftover_is_blocked(it, app.display_name)]
-    items.extend(_scan_installer_folders_for_items(items))
+    items.extend(_tagged("path", _scan_installer_folders_for_items(items)))
     known_paths = {it.path.lower() for it in items}
-    items.extend(it for it in _scan_ext_keys_for_removed_progids(items)
+    items.extend(it for it in _tagged("id", _scan_ext_keys_for_removed_progids(items))
                  if it.path.lower() not in known_paths and not leftover_is_blocked(it, app.display_name))
     _mark_shared_roots(items, app)
     if any(it.kind == "registry_value" for it in items):
@@ -2757,12 +2840,7 @@ _MOVEFILE_DELAY_UNTIL_REBOOT = 0x00000004
 
 _shutdown_privilege_enabled = None
 
-# Explicit prototypes (argtypes/restype) for the WinAPI functions used below. WITHOUT
-# THEM GetCurrentProcess() returns the pseudo-handle -1, which ctypes treats as a plain
-# 32-bit c_int; on 64-bit Python the upper 32 bits of the HANDLE argument passed later
-# may be undefined (garbage), which gave OpenProcessToken() a bad handle and silently
-# broke the whole schedule-removal-on-reboot path ("could not delete or schedule
-# deletion on restart" although it should have worked).
+# Explicit argtypes/restype: ctypes would truncate the 64-bit pseudo-handle from GetCurrentProcess() to c_int.
 _advapi32 = ctypes.windll.advapi32
 _kernel32b = ctypes.windll.kernel32
 _kernel32b.GetCurrentProcess.restype = wintypes.HANDLE
@@ -3000,14 +3078,8 @@ _MAX_REGISTRY_BACKUPS = 50
 MAX_REGISTRY_BACKUPS = _MAX_REGISTRY_BACKUPS
 
 
-# Registry backup integrity. The .reg files and the index live in the user's profile
-# (%APPDATA%), where ANY process of that user can write, while they are restored and
-# deleted by the ELEVATED program. Therefore: 1) we touch only .reg files located
-# DIRECTLY in the backup folder (not any path given in the index) and not through a
-# link, 2) when a backup is created its SHA-256 is stored in HKLM (writing there needs
-# administrator rights, so an ordinary process cannot forge it), and it is verified
-# before restoring. A file that was replaced or added by hand has no matching hash and
-# is not imported.
+# Registry backups live in a user-writable folder but are restored by the elevated program: only .reg files directly
+# in the backup folder are used, and each must match the SHA-256 stored in HKLM when the backup was made.
 _BACKUP_HASH_KEY = r"Software\HOTS Uninstaller\BackupHashes"
 _MONITOR_HASH_KEY = r"Software\HOTS Uninstaller\MonitorLogHashes"
 
@@ -3075,15 +3147,17 @@ def _backup_verified(path: str) -> bool:
     return isinstance(stored, str) and stored.lower() == digest.lower()
 
 
-def remove_backup_hash_store() -> None:
-    try:
-        _delete_registry_key_recursive(winreg.HKEY_LOCAL_MACHINE, _BACKUP_HASH_KEY)
-    except OSError:
-        pass
-    try:
-        _delete_registry_key_recursive(winreg.HKEY_LOCAL_MACHINE, _MONITOR_HASH_KEY)
-    except OSError:
-        pass
+def remove_backup_hash_store(backups: bool = True, monitor: bool = True) -> None:
+    if backups:
+        try:
+            _delete_registry_key_recursive(winreg.HKEY_LOCAL_MACHINE, _BACKUP_HASH_KEY)
+        except OSError:
+            pass
+    if monitor:
+        try:
+            _delete_registry_key_recursive(winreg.HKEY_LOCAL_MACHINE, _MONITOR_HASH_KEY)
+        except OSError:
+            pass
     try:
         winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, _BACKUP_HASH_KEY.rsplit("\\", 1)[0])
     except OSError:
@@ -3140,11 +3214,8 @@ _UNINSTALL_HISTORY_RETENTION_DAYS = 90
 
 _HISTORY_LOCK = threading.RLock()
 
-# Uninstall logs: one .txt file per history entry, in a separate folder. A history entry
-# holds ONLY the file name (no path), and every open and delete goes through
-# _uninstall_log_path(). The history file lives in the user's profile and the program
-# runs as administrator, so a tampered entry must not be able to redirect deletion or
-# opening to a foreign file.
+# A history entry holds only a file name; every open and delete goes through _uninstall_log_path(),
+# because the history file is user-writable and the program runs elevated.
 _UNINSTALL_LOG_RE = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f]{1,100}_\d{8}_\d{6}(?:_\d+)?\.txt$")
 _MAX_LOG_LINES = 20000
 
@@ -3236,8 +3307,7 @@ def write_uninstall_log(app_name: str, freed_kb: int, results: list,
         for n in range(100):
             name = f"{base}.txt" if n == 0 else f"{base}_{n}.txt"
             try:
-                # "x" = create a NEW file only (never overwrites, never follows a
-                # planted link).
+                # Mode "x" creates a new file only and never follows a planted link.
                 with open(d / name, "x", encoding="utf-8-sig", newline="\r\n") as f:
                     f.write(text)
                 return name
@@ -3284,10 +3354,6 @@ def _load_uninstall_history_raw() -> list[dict]:
 
 
 def _save_uninstall_history_raw(entries: list[dict]) -> bool:
-    """Writes via a temp file + os.replace: an interrupted write does not destroy the
-    history, and a planted link in place of the file is replaced, not read (the
-    program writes here as administrator).
-    """
     try:
         path = _uninstall_history_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3480,8 +3546,6 @@ def _mark_backup_restored(path: str) -> None:
 def restore_registry_backup(path: str) -> tuple[bool, str]:
     if not os.path.isfile(path):
         return False, T("err_backup_file_missing")
-    # Verify first: the file must be in the backup folder and have a matching hash in
-    # HKLM, otherwise NOTHING is imported into the registry as administrator.
     if not _backup_verified(path):
         return False, T("err_backup_unverified")
     try:
@@ -3523,10 +3587,7 @@ def reveal_backup_in_explorer(path: str) -> None:
 
 
 def open_backup_in_notepad(path: str) -> None:
-    """Opens a .reg backup file in Notepad (explicitly notepad.exe: the default action
-    for .reg in Windows is a MERGE into the registry, so os.startfile would be
-    dangerous).
-    """
+    # Explicit notepad.exe: the default action for .reg files is a MERGE into the registry.
     try:
         if os.path.isfile(path):
             popen_no_busy_cursor(["notepad.exe", path])
@@ -3863,10 +3924,7 @@ def is_deletable_file_location(path: str) -> bool:
     return not (_is_system_container(parent_norm) or _is_under_windows_dir(parent_norm))
 
 
-# Registry CONTAINER keys that are NEVER deleted as a whole (they hold data of the whole
-# system and all programs). Case-insensitive comparison; "Software\WOW6432Node" is
-# treated like "Software". Applies only to KEYS (kind == "registry"): single values
-# inside these keys (e.g. an entry in "...\Run") can still be deleted.
+# Registry container keys that are never deleted as a whole; single values inside them can still be removed.
 _PROTECTED_REG_KEYS = {
     r"software\microsoft", r"software\microsoft\windows",
     r"software\microsoft\windows\currentversion",
@@ -3975,11 +4033,6 @@ def _is_protected_registry_value(item: "LeftoverItem") -> bool:
 
 
 def _is_reparse_folder(path: str) -> bool:
-    """Whether a FOLDER is a link (junction/symlink). Such a folder is not deleted,
-    because it may have been planted to point at another folder. Files are checked
-    for symlinks only (OneDrive cloud files also have the reparse attribute and are
-    legitimate).
-    """
     try:
         if os.path.islink(path):
             return True
@@ -3995,9 +4048,6 @@ _PKG_FULL_IN_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9.\-])([A-Za-z0-9][A-Za-z0-9.\-]{0,63})_\d+(?:\.\d+){1,3}_[A-Za-z0-9]+_[A-Za-z0-9.\-~]*"
     r"_([0-9a-hjkmnp-tv-z]{13})(?![0-9A-Za-z])")
 
-# family name -> True if unregistered (or already gone), False if it failed.
-# Cleared by every scan_leftovers() so one uninstall never inherits the state
-# of another.
 _package_unregister_state: dict[str, bool] = {}
 _matched_package_families: set[str] = set()
 _own_package_families: set[str] = set()
@@ -4076,10 +4126,6 @@ def _unregister_packages_for_items(items: list[LeftoverItem], app_name: str) -> 
     return errors
 
 
-# Task Scheduler tasks (TaskCache). The keys HKLM\...\Schedule\TaskCache are writable by
-# SYSTEM only (ACL): even an administrator gets "Access denied" (WinError 5), and
-# deleting the registry by hand would still leave the task file in System32\Tasks. So
-# the task is deleted officially (schtasks /Delete), which cleans both places at once.
 _TASKCACHE_PREFIX = r"software\microsoft\windows nt\currentversion\schedule\taskcache" + "\\"
 _TASK_GUID_RE = re.compile(r"^\{[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\}$")
 
@@ -4207,10 +4253,7 @@ def _scheduled_task_path(section: str, tail: str) -> Optional[str]:
 
 
 def _valid_task_path(task_path: str) -> bool:
-    """Only regular application tasks. System tasks (\\Microsoft\\...) and odd paths
-    are rejected: this is the last line of defense, because the program runs with
-    administrator rights.
-    """
+    # Last line of defense: only regular application tasks are accepted, since the program runs elevated.
     if not task_path or len(task_path) > 260 or not task_path.startswith("\\"):
         return False
     if any(ord(c) < 32 for c in task_path) or ".." in task_path or "*" in task_path:
@@ -4447,15 +4490,22 @@ def _mark_shared_roots(items: list, app: "InstalledApp") -> None:
                 it.shared_root = True
 
 
-def _registry_key_is_empty(hive: int, subkey: str) -> Optional[bool]:
+def _registry_key_is_empty(hive: int, subkey: str, _depth: int = 0) -> Optional[bool]:
     try:
         with winreg.OpenKey(hive, subkey, 0, winreg.KEY_READ) as key:
             n_sub, n_val, _ = winreg.QueryInfoKey(key)
-            return n_sub == 0 and n_val == 0
+            if n_val:
+                return False
+            children = [winreg.EnumKey(key, i) for i in range(n_sub)]
     except FileNotFoundError:
         return None
     except OSError:
         return False
+    if not children:
+        return True
+    if _depth >= 3 or len(children) > 8:
+        return False
+    return all(_registry_key_is_empty(hive, f"{subkey}\\{c}", _depth + 1) is not False for c in children)
 
 
 def _name_tokens_of_app(app_name: str) -> list[str]:
@@ -4557,7 +4607,6 @@ def delete_leftovers(items: list[LeftoverItem], app_name: str = "",
 
     errors.extend(_unregister_packages_for_items(items, app_name))
 
-    # Services last: their executable must already be gone from disk.
     for item in sorted(items, key=deletion_order_key):
         try:
             if _belongs_to_other_package(item.path, app_name) or _is_appx_registration_value(item):
@@ -4631,7 +4680,11 @@ def delete_leftovers(items: list[LeftoverItem], app_name: str = "",
                     if empty is None:
                         continue
                     if empty:
-                        winreg.DeleteKey(item.hive, item.subkey)
+                        kept: list = []
+                        _delete_registry_key_recursive(item.hive, item.subkey, kept)
+                        if kept:
+                            hive_name = item.path.split("\\", 1)[0]
+                            _kept_details[item.path] = [f"{hive_name}\\{k}" for k in kept]
                     else:
                         subs, vals = _reg_enum(item.hive, item.subkey)
                         _kept_details[item.path] = ([f"{item.path}\\{c}" for c in subs[:8]]
@@ -4789,11 +4842,7 @@ def promote_association_backups(items: list["LeftoverItem"]) -> None:
 
 
 def plan_association_restores(items: list["LeftoverItem"]) -> list[AssocRestore]:
-    """Call BEFORE removing the items. Returns only associations that certainly
-    belonged to the program being removed: the default value points to a ProgID
-    whose key is on the same removal list. If someone else changed the association
-    (e.g. another player), nothing is touched.
-    """
+    # Call before removing the items.
     removed_keys = {(it.subkey or "").lower() for it in items if it.kind == "registry"}
     plan: list[AssocRestore] = []
     seen: set = set()
@@ -4815,10 +4864,7 @@ def plan_association_restores(items: list["LeftoverItem"]) -> list[AssocRestore]
 
 
 def apply_association_restores(plan: list[AssocRestore]) -> list[str]:
-    """Call AFTER removing the items. Restores the previous association only if the
-    default value still points to the removed ProgID and its key is really gone
-    (failed removal => untouched). Returns errors.
-    """
+    # Call after removing the items.
     errors: list[str] = []
     for r in plan:
         try:

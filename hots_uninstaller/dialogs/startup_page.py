@@ -235,7 +235,7 @@ class _StartupItemDelegate(HoverHelpDelegateMixin, QStyledItemDelegate):
         font.setBold(True)
         font.setItalic(False)
         painter.setFont(font)
-        painter.setPen(QColor(DARK["fg2"]))
+        painter.setPen(QColor(DARK["accent"]))
         text_rect = option.rect.adjusted(10, 0, -10, 0)
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
         painter.restore()
@@ -510,7 +510,7 @@ class StartupPage(HOTSPage):
 
     def _card_style(self) -> str:
         return (f"background: {DARK['panel_bg']}; "
-                f"border: 1px solid {DARK['border_faint']}; border-radius: 6px;")
+                f"border: 1px solid {DARK['border_faint']}; border-radius: 8px;")
 
     def _build(self):
         cl = self.content_layout
@@ -539,7 +539,7 @@ class StartupPage(HOTSPage):
         self.view.on_toggle_group = self._toggle_group
         self.view.setStyleSheet(
             f"QListView {{ background-color: {DARK['table_bg']}; "
-            f"border: 1px solid {DARK['border_soft']}; border-radius: 6px; }}"
+            f"border: 1px solid {DARK['border_soft']}; border-radius: 8px; }}"
         )
 
         cl_body.addWidget(self.view, 1)

@@ -19,7 +19,7 @@ from ..constants import DARK, css_color, load_settings, save_settings
 from ..i18n import T
 from ..proc_utils import popen_no_busy_cursor
 from ..widgets_qt import (
-    HOTSPage, HOTSDialog, HOTSButton, HOTSContextMenu,
+    HOTSPage, HOTSDialog, HOTSButton, HOTSContextMenu, SortButton,
     attach_fluent_tip, colored_svg_icon, show_fluent_popup_at,
 )
 from ..hover_help import (
@@ -158,6 +158,7 @@ class _ProgramItemDelegate(HoverHelpDelegateMixin, QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._delete_icon = colored_svg_icon(FIF.DELETE, DARK["red"], sizes=(15,))
+        self._delete_icon_disabled = colored_svg_icon(FIF.DELETE, DARK["gray"], sizes=(15,))
         self._init_hover_help()
 
     def sizeHint(self, option, index):
@@ -214,7 +215,7 @@ class _ProgramItemDelegate(HoverHelpDelegateMixin, QStyledItemDelegate):
         font.setBold(True)
         font.setItalic(False)
         painter.setFont(font)
-        painter.setPen(QColor(DARK["fg2"]))
+        painter.setPen(QColor(DARK["accent"]))
         text_rect = option.rect.adjusted(10, 0, -10, 0)
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
         painter.restore()
@@ -281,7 +282,7 @@ class _ProgramItemDelegate(HoverHelpDelegateMixin, QStyledItemDelegate):
             painter.drawEllipse(QRect(mon_x, option.rect.center().y() - self.MONITOR_DOT // 2,
                                       self.MONITOR_DOT, self.MONITOR_DOT))
 
-        self._delete_icon.paint(painter, delete_rect)
+        (self._delete_icon_disabled if app.is_own else self._delete_icon).paint(painter, delete_rect)
 
         painter.restore()
 
@@ -291,10 +292,7 @@ class _ProgramsListView(HoverHelpViewMixin, QListView):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.viewport().setAttribute(Qt.WA_Hover, True)
-        # Must be False: group header rows have a DIFFERENT height than program
-        # rows (HEADER_HEIGHT vs ROW_HEIGHT). With True (which assumes all rows
-        # are the same size) Qt would compute row positions wrongly, giving
-        # overlapping/misaligned rows while scrolling.
+        # Must be False: group headers and program rows have different heights.
         self.setUniformItemSizes(False)
         self.setSelectionMode(QAbstractItemView.NoSelection)
         self.setFocusPolicy(Qt.NoFocus)
@@ -307,6 +305,8 @@ class _ProgramsListView(HoverHelpViewMixin, QListView):
         self.on_uninstall = None
         self.on_context_menu = None
         self.on_toggle_group = None
+        self.on_show_info = None
+        self._own_tip_row = -1
         self._init_hover_help_view()
 
         self.empty_label = QLabel("", self.viewport())
@@ -327,6 +327,19 @@ class _ProgramsListView(HoverHelpViewMixin, QListView):
         self._close_help_popup()
         self.itemDelegate().set_hover_row(-1, self)
         self.itemDelegate().set_name_hover(-1, self)
+
+    def _close_help_popup(self, *_args):
+        self._own_tip_row = -1
+        super()._close_help_popup()
+
+    def _sync_own_tip(self, row: int, delete_rect=None):
+        if row == self._own_tip_row:
+            return
+        self._close_help_popup()
+        if row != -1 and self.on_show_info:
+            self._own_tip_row = row
+            self._help_popup = self.on_show_info(
+                T("prog_own_app_blocked"), self.mapToGlobal(delete_rect.bottomLeft()), 300)
 
     def set_empty_text(self, text: str):
         self.empty_label.setText(text)
@@ -353,6 +366,7 @@ class _ProgramsListView(HoverHelpViewMixin, QListView):
             delegate.set_hover_row(-1, self)
             delegate.set_name_hover(-1, self)
             self.setCursor(Qt.PointingHandCursor)
+            self._sync_own_tip(-1)
             if self._hover_help_row != -1 and not self._popup_hit(pos):
                 self._close_help_popup()
             super().mouseMoveEvent(event)
@@ -368,14 +382,15 @@ class _ProgramsListView(HoverHelpViewMixin, QListView):
                 delegate.hit_rects(self.visualRect(index), name)
 
             over_help = self.hover_help_on_move(delegate, index.row(), app, name_rect, help_rect, pos)
-            if over_help:
-                self.setCursor(Qt.PointingHandCursor)
-            elif delete_rect.contains(pos):
+            over_own_delete = app is not None and app.is_own and delete_rect.contains(pos)
+            self._sync_own_tip(index.row() if over_own_delete else -1, delete_rect)
+            if over_help or (delete_rect.contains(pos) and not over_own_delete):
                 self.setCursor(Qt.PointingHandCursor)
             else:
                 self.setCursor(Qt.ArrowCursor)
         else:
             delegate.set_name_hover(-1, self)
+            self._sync_own_tip(-1)
             self.setCursor(Qt.ArrowCursor)
 
         if not over_help and self._hover_help_row != -1 and not self._popup_hit(pos):
@@ -440,7 +455,7 @@ class ProgramsPage(HOTSPage):
 
     def _card_style(self) -> str:
         return (f"background: {DARK['panel_bg']}; "
-                f"border: 1px solid {DARK['border_faint']}; border-radius: 6px;")
+                f"border: 1px solid {DARK['border_faint']}; border-radius: 8px;")
 
     def _build(self):
         cl = self.content_layout
@@ -461,12 +476,13 @@ class ProgramsPage(HOTSPage):
         self.view.setItemDelegate(_ProgramItemDelegate(self.view))
         self.view.set_empty_text(T("prog_no_results"))
         self.view.on_uninstall = self._uninstall_one
+        self.view.on_show_info = self._show_info_popup
         self.view.on_show_help = self._show_help_popup
         self.view.on_context_menu = self._show_context_menu
         self.view.on_toggle_group = self._toggle_group
         self.view.setStyleSheet(
             f"QListView {{ background-color: {DARK['table_bg']}; "
-            f"border: 1px solid {DARK['border_soft']}; border-radius: 6px; }}"
+            f"border: 1px solid {DARK['border_soft']}; border-radius: 8px; }}"
         )
 
         cl_body.addWidget(self.view, 1)
@@ -509,6 +525,10 @@ class ProgramsPage(HOTSPage):
         self.search.setFixedWidth(165)
         self.search.textChanged.connect(self._on_search_changed)
         lay.addWidget(self.search)
+
+        self.sort_btn = SortButton(load_settings().get("programs_sort", "name"))
+        self.sort_btn.changed.connect(self._on_sort_changed)
+        lay.addWidget(self.sort_btn)
 
         refresh_btn = HOTSButton(FIF.SYNC, "#60c8ff", "")
         refresh_btn.setFixedSize(42, 42)
@@ -571,6 +591,12 @@ class ProgramsPage(HOTSPage):
         self._show_system_btn.set_accent(self._show_system)
         self._apply_filter()
 
+    def _on_sort_changed(self, mode: str):
+        fresh = load_settings()
+        fresh["programs_sort"] = mode
+        save_settings(fresh)
+        self._apply_filter()
+
     def _toggle_group(self, key: str):
         self._collapsed[key] = not self._collapsed.get(key)
         fresh = load_settings()
@@ -592,9 +618,16 @@ class ProgramsPage(HOTSPage):
             (a for a in apps if _is_new_program(a, dates)),
             key=lambda a: _effective_install_date(a, dates) or date.min, reverse=True,
         )
+        mode = self.sort_btn.mode
+        if mode == "size":
+            key, newest_first = (lambda a: a.estimated_size_kb), True
+        elif mode == "date":
+            key, newest_first = (lambda a: _effective_install_date(a, dates) or date.min), True
+        else:
+            key, newest_first = (lambda a: (a.display_name or "").lower()), False
         rest_apps = sorted(
             (a for a in apps if not _is_new_program(a, dates)),
-            key=lambda a: (a.display_name or "").lower(),
+            key=key, reverse=newest_first,
         )
 
         rows = []
@@ -617,14 +650,19 @@ class ProgramsPage(HOTSPage):
         total = len(self._all_apps)
         self.status_label.setText(T("status_count_simple", shown=shown, total=total))
 
+    def _show_info_popup(self, text: str, global_pos, width: int):
+        return show_fluent_popup_at(global_pos, text, width=width)
+
     def _show_help_popup(self, app, global_pos):
         return show_fluent_popup_at(global_pos, _details_tooltip(app, app.uid in self._monitored_uids), width=420)
 
     def _show_context_menu(self, app, global_pos):
-        items = [("✕", DARK["red"], T("menu_uninstall"), lambda: self._uninstall_one(app))]
-        if app.is_ghost:
-            items.append(("⚠", DARK["fg2"], T("menu_force_remove"), lambda: self._force_remove_one(app)))
-        items.append(("🔍", "#60c8ff", T("menu_scan_leftovers"), lambda: self._scan_leftovers_one(app)))
+        items = []
+        if not app.is_own:
+            items.append(("✕", DARK["red"], T("menu_uninstall"), lambda: self._uninstall_one(app)))
+            if app.is_ghost:
+                items.append(("⚠", DARK["fg2"], T("menu_force_remove"), lambda: self._force_remove_one(app)))
+            items.append(("🔍", "#60c8ff", T("menu_scan_leftovers"), lambda: self._scan_leftovers_one(app)))
         if app.install_location and os.path.isdir(app.install_location):
             items.append(("📁", DARK["fg2"], T("menu_open_location"), lambda: self._open_location(app)))
         items.append(("🔑", DARK["fg2"], T("menu_open_registry"), lambda: cu.open_registry_key(app)))
@@ -635,6 +673,8 @@ class ProgramsPage(HOTSPage):
         self._ctx_menu.popup(global_pos)
 
     def _uninstall_one(self, app):
+        if app.is_own:
+            return
         if app.is_ghost:
             self._remove_ghost(app)
             return

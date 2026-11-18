@@ -10,11 +10,11 @@ from PySide6.QtWidgets import (
     QScrollBar, QCheckBox, QRadioButton, QStyle, QStyleOptionButton, QAbstractScrollArea, QAbstractItemView,
     QStyledItemDelegate, QStyleOptionViewItem,
 )
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, Property, QObject, QEvent, QTimer, QRect, QRectF, QPointF, QVariantAnimation, QSize as _QSize, Signal
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, Property, QObject, QEvent, QTimer, QRect, QRectF, QPoint, QPointF, QVariantAnimation, QSize as _QSize, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPalette, QIcon, QCursor, QPainter, QPen
 
 import shiboken6
-from .constants import DARK, IS_LIGHT_THEME, accent_rgba
+from .constants import DARK, EFFECTS, IS_LIGHT_THEME, accent_rgba
 from .bg_tasks import is_shutting_down, register_wakeup
 from .icons import FIF, AppIcon, make_qicon
 from .ui_parts import IconWidget, IndeterminateProgressRing, TransparentToolButton
@@ -392,13 +392,7 @@ class _FluentTipFilter(QObject):
             msg.setFixedWidth(self._width)
         v.addWidget(msg)
 
-        # ensurePolished() forces the correct (stylesheet) font immediately; without it
-        # outer.adjustSize() below measured the size BEFORE the QLabel got its polished
-        # font (font-size: 9pt), so Qt wrapped the text with the wrong font and the
-        # tooltip was sometimes a line too short, cutting the text. heightForWidth() is
-        # the same method QLabel uses for its own wrapping (QFontMetrics.boundingRect()
-        # wraps with a different algorithm and only moves the problem to another text).
-        # +2 px is a margin for rounding at fractional DPI scaling (e.g. 125%).
+        # ensurePolished() first: adjustSize() must measure with the stylesheet font, or the tooltip text gets cut.
         for w in (top_line, spacer, msg, outer):
             w.ensurePolished()
         if self._width:
@@ -877,11 +871,12 @@ class HOTSDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None, title: str = "HOTS",
                  min_width: int = 340, min_height: int = 200):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_TranslucentBackground, EFFECTS)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint)
         self.setWindowTitle(title)
         self.setMinimumSize(min_width, min_height)
-        self.setStyleSheet("QDialog { background: transparent; }")
+        solid = "#f0f4f9" if IS_LIGHT_THEME else "#202020"
+        self.setStyleSheet(f"QDialog {{ background: {'transparent' if EFFECTS else solid}; }}")
 
         self._title_text = title
         self._build_frame()
@@ -994,7 +989,7 @@ class HOTSDialog(QDialog):
             QTimer.singleShot(300, lambda: win_icon.apply(int(self.winId())))
             _dwm_dark_titlebar(hwnd, dark=not IS_LIGHT_THEME)
             enable_rounded_corners(hwnd)
-            _dwm_mica_dialog(hwnd, dark=not IS_LIGHT_THEME)
+            _dwm_mica_dialog(hwnd, dark=not IS_LIGHT_THEME, backdrop=EFFECTS)
         except Exception:
             pass
 
@@ -1048,7 +1043,7 @@ class HOTSPage(QWidget):
 
     def _build_frame(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
+        root.setContentsMargins(24, 14, 24, 14)
         root.setSpacing(0)
 
         header = QHBoxLayout()
@@ -1087,7 +1082,11 @@ class HOTSPage(QWidget):
 
         sep = QFrame()
         sep.setFixedHeight(2)
-        sep.setStyleSheet(f"background-color: {accent_rgba(0.35)}; border: none;")
+        sep.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+            f"stop:0 {accent_rgba(0.90)}, stop:0.55 {accent_rgba(0.35)}, stop:1 {accent_rgba(0.0)}); "
+            "border: none;"
+        )
         root.addWidget(sep)
         root.addSpacing(12)
 
@@ -1761,7 +1760,7 @@ def _dwm_dark_titlebar(hwnd: int, dark: bool = True) -> None:
     except Exception:
         pass
 
-def _dwm_mica_dialog(hwnd: int, dark: bool = True) -> None:
+def _dwm_mica_dialog(hwnd: int, dark: bool = True, backdrop: bool = True) -> None:
     try:
         import ctypes.wintypes
         _ensure_dwm_argtypes()
@@ -1772,6 +1771,8 @@ def _dwm_mica_dialog(hwnd: int, dark: bool = True) -> None:
             ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(
                 ctypes.wintypes.HWND(hwnd), ctypes.byref(margins)
             )
+            if not backdrop:
+                return
             if build >= 22621:
                 val = ctypes.c_int(2)
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -1843,3 +1844,48 @@ class NoScrollbarContextMenuFilter(QObject):
         if event.type() == QEvent.ContextMenu and isinstance(obj, QScrollBar):
             return True
         return super().eventFilter(obj, event)
+
+
+SORT_MODES = ("name", "size", "date")
+
+
+def _sort_color(mode: str) -> str:
+    return DARK["accent"] if mode == "name" else DARK[f"sort_{mode}"]
+
+
+class SortButton(HOTSButton):
+    changed = Signal(str)
+
+    def __init__(self, mode: str, parent=None):
+        mode = mode if mode in SORT_MODES else "name"
+        super().__init__(FIF.SORT, _sort_color(mode), "", parent)
+        self._mode = mode
+        self.setFixedSize(42, 42)
+        self._update_tip()
+        self.clicked.connect(self._open_menu)
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def _update_tip(self):
+        from .i18n import T
+        attach_fluent_tip(self, f"{T('sort_by')}: {T(f'sort_{self._mode}')}")
+
+    def _open_menu(self):
+        from .i18n import T
+        items = [
+            ("✓" if m == self._mode else "●", _sort_color(m), T(f"sort_{m}"), lambda m=m: self._set_mode(m))
+            for m in SORT_MODES
+        ]
+        self._menu = HOTSContextMenu(self, items)
+        top = self.mapToGlobal(QPoint(0, 0))
+        self._menu.popup(QPoint(top.x(), top.y() - self._menu.height() - 4))
+
+    def _set_mode(self, mode: str):
+        if mode == self._mode:
+            return
+        self._mode = mode
+        self.set_icon(FIF.SORT, _sort_color(mode))
+        self._update_tip()
+        self.changed.emit(mode)

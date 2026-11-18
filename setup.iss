@@ -1,6 +1,6 @@
 ﻿
 #define MyAppName "HOTS Uninstaller"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.1"
 #define MyAppPublisher "Darsono"
 #define MyAppExeName "HOTS Uninstaller.exe"
 #expr EmitLanguagesSection
@@ -18,6 +18,7 @@ VersionInfoDescription={#MyAppName} Setup
 DefaultDirName={autopf}\{#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
+MinVersion=10.0
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
 LicenseFile=LICENSE.txt
@@ -32,8 +33,8 @@ WizardStyle=modern dynamic
 AppMutex=Local\HOTS_Uninstaller_SingleInstance_Mutex
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "explorercontext"; Description: "{cm:ContextMenuTask}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+Name: "explorercontext"; Description: "{cm:ContextMenuTask}"
 
 [CustomMessages]
 ContextMenuTask=Add "Remove with HOTS" to the context menu
@@ -41,7 +42,9 @@ ContextMenuTask=Add "Remove with HOTS" to the context menu
 [Files]
 Source: "dist\hots_uninstaller_launcher.dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\hots_uninstaller_launcher.dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "README.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "readme.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "hots_uninstall_cleanup.cmd"; DestDir: "{app}"; Flags: ignoreversion
 
 [Dirs]
@@ -144,7 +147,7 @@ begin
       Lang := Copy(Line, 1, P2 - 1);
 
       if (Lang = 'pl') or (Lang = 'fr') or (Lang = 'de') or (Lang = 'es')
-         or (Lang = 'en') then
+         or (Lang = 'ru') or (Lang = 'pt') or (Lang = 'it') or (Lang = 'en') then
         Result := Lang;
       Exit;
     end;
@@ -160,6 +163,9 @@ begin
   else if (L = 'fr') or (L = 'french') then Result := 'fr'
   else if (L = 'de') or (L = 'german') then Result := 'de'
   else if (L = 'es') or (L = 'spanish') then Result := 'es'
+  else if (L = 'ru') or (L = 'russian') then Result := 'ru'
+  else if (L = 'pt') or (Pos('portuguese', L) > 0) then Result := 'pt'
+  else if (L = 'it') or (L = 'italian') then Result := 'it'
   else if (L = 'en') or (L = 'english') then Result := 'en'
   else Result := GetAppLanguage();
 end;
@@ -173,6 +179,9 @@ begin
   else if Lang = 'fr' then Result := 'Supprimer avec HOTS'
   else if Lang = 'de' then Result := 'Mit HOTS entfernen'
   else if Lang = 'es' then Result := 'Eliminar con HOTS'
+  else if Lang = 'ru' then Result := 'Удалить с помощью HOTS'
+  else if Lang = 'pt' then Result := 'Remover com HOTS'
+  else if Lang = 'it' then Result := 'Rimuovi con HOTS'
   else Result := 'Remove with HOTS';
 end;
 
@@ -189,6 +198,12 @@ begin
     Result := 'Im Kontextmenü „Mit HOTS entfernen“ hinzufügen'
   else if Lang = 'es' then
     Result := 'Añadir «Eliminar con HOTS» al menú contextual'
+  else if Lang = 'ru' then
+    Result := 'Добавить «Удалить с помощью HOTS» в контекстное меню'
+  else if Lang = 'pt' then
+    Result := 'Adicionar “Remover com HOTS” ao menu de contexto'
+  else if Lang = 'it' then
+    Result := 'Aggiungi «Rimuovi con HOTS» al menu contestuale'
   else
     Result := CustomMessage('ContextMenuTask');
 end;
@@ -261,6 +276,24 @@ begin
       'directamente. Actualizará el programa en su lugar, sin perder tu configuración ' +
       'ni tu historial.' + #13#10 + #13#10 +
       '¿Deseas continuar de todos modos y eliminar completamente HOTS Uninstaller?'
+  else if Lang = 'ru' then
+    Result :=
+      'Если вы собираетесь установить более новую версию HOTS Uninstaller, вам не нужно ' +
+      'сначала удалять программу - просто запустите новый установщик напрямую. Он ' +
+      'обновит программу на месте, не потеряв ваши настройки и историю.' + #13#10 + #13#10 +
+      'Всё равно хотите продолжить и полностью удалить HOTS Uninstaller?'
+  else if Lang = 'pt' then
+    Result :=
+      'Se está prestes a instalar uma versão mais recente do HOTS Uninstaller, não precisa de ' +
+      'desinstalar primeiro - basta executar o novo instalador diretamente. Ele ' +
+      'atualizará o programa no local, sem perder as suas definições nem o seu histórico.' + #13#10 + #13#10 +
+      'Ainda assim, deseja continuar e remover completamente o HOTS Uninstaller?'
+  else if Lang = 'it' then
+    Result :=
+      'Se stai per installare una versione più recente di HOTS Uninstaller, non è necessario ' +
+      'disinstallare prima: basta avviare direttamente il nuovo programma di installazione. ' +
+      'Aggiornerà il programma sul posto, senza perdere le tue impostazioni né la cronologia.' + #13#10 + #13#10 +
+      'Vuoi comunque continuare e rimuovere completamente HOTS Uninstaller?'
   else
     Result :=
       'If you are about to install a newer version of HOTS Uninstaller, you do NOT need to ' +
@@ -304,6 +337,24 @@ begin
       'el programa se desinstalará, pero tu configuración, tu historial y tus copias de seguridad ' +
       'permanecerán en este equipo.' + #13#10 + #13#10 +
       '¿Continuar de todos modos?'
+  else if Lang = 'ru' then
+    Result :=
+      'Не удалось открыть окно выбора действий с сохранёнными данными. Если продолжить, ' +
+      'программа будет удалена, но ваши настройки, история и резервные копии останутся ' +
+      'на этом компьютере.' + #13#10 + #13#10 +
+      'Всё равно продолжить?'
+  else if Lang = 'pt' then
+    Result :=
+      'Não foi possível abrir a janela de escolha do que fazer com os dados guardados. Se ' +
+      'continuar, o programa será desinstalado, mas as suas definições, o histórico e as ' +
+      'cópias de segurança permanecerão neste computador.' + #13#10 + #13#10 +
+      'Continuar mesmo assim?'
+  else if Lang = 'it' then
+    Result :=
+      'Non è stato possibile aprire la finestra per scegliere cosa fare con i dati salvati. ' +
+      'Se continui, il programma verrà disinstallato, ma le tue impostazioni, la cronologia e ' +
+      'i backup resteranno su questo computer.' + #13#10 + #13#10 +
+      'Continuare comunque?'
   else
     Result :=
       'The window for choosing what to do with the saved data could not be opened. If you ' +

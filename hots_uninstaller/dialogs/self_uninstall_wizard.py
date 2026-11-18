@@ -64,13 +64,21 @@ class SelfUninstallWizardDialog(HOTSDialog):
         cl.addWidget(h_separator())
         cl.addSpacing(6)
 
-        n_items = self._counts.get("saved_items", 0)
-        self._card_data = _OptionCard(
+        n_settings = self._counts.get("settings_items", 0)
+        self._card_settings = _OptionCard(
             T("uninst_opt_data_title"),
-            T("uninst_opt_data_desc_n", n=n_items) if n_items else T("uninst_opt_data_desc_none"),
+            T("uninst_opt_data_desc_n", n=n_settings) if n_settings else T("uninst_opt_data_desc_none"),
             default=True, enabled=True,
         )
-        cl.addWidget(self._card_data)
+        cl.addWidget(self._card_settings)
+
+        n_backups = self._counts.get("backup_items", 0)
+        self._card_backups = _OptionCard(
+            T("uninst_opt_backups_title"),
+            T("uninst_opt_backups_desc_n", n=n_backups) if n_backups else T("uninst_opt_backups_desc_none"),
+            default=False, enabled=True,
+        )
+        cl.addWidget(self._card_backups)
 
         cl.addSpacing(2)
         footer = QLabel(T("uninst_wizard_footer"))
@@ -102,6 +110,7 @@ class SelfUninstallWizardDialog(HOTSDialog):
 
     def _confirm(self):
         self.choices = {
-            "delete_saved_data": self._card_data.is_checked(),
+            "delete_settings": self._card_settings.is_checked(),
+            "delete_backups": self._card_backups.is_checked(),
         }
         self.accept()

@@ -3,7 +3,7 @@ import re
 from typing import Callable, Dict, Optional
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QSize, QVariantAnimation, QEasingCurve
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QRadialGradient
 from PySide6.QtWidgets import QAbstractButton, QWidget, QVBoxLayout
 
 from .constants import DARK
@@ -142,6 +142,12 @@ class NavTile(QAbstractButton):
             p.drawRoundedRect(box, self.RADIUS, self.RADIUS)
 
         if sel > 0:
+            radius = self.height() / 2.0
+            halo = QRadialGradient(QPointF(self.width() / 2.0, self.height() / 2.0), radius)
+            for i in range(9):
+                t = i / 8
+                halo.setColorAt(t, _with_alpha(DARK["accent"], 0.38 * sel * (1.0 - t) ** 2))
+            p.fillRect(self.rect(), halo)
             p.setBrush(_with_alpha(DARK["accent"], 0.14 * sel))
             p.setPen(QPen(_with_alpha(DARK["accent"], 0.45 * sel), 1))
             p.drawRoundedRect(box, self.RADIUS, self.RADIUS)

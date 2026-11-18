@@ -93,9 +93,6 @@ def _is_temp_folder_junk_name(filename: str) -> bool:
     return any(fnmatch.fnmatch(lower, pat) for pat in _TEMP_FOLDER_PATTERNS)
 
 
-# Files/folders modified within the last N seconds are not touched during scanning: a
-# running application may be writing them right now (a browser download in progress, an
-# autosave file, etc.).
 _MIN_AGE_SECONDS = 24 * 60 * 60
 
 
@@ -297,9 +294,6 @@ def _scan_windows_old() -> list[JunkItem]:
     system_drive = os.environ.get("SystemDrive", "C:").rstrip(":\\") + ":"
     for name in ("Windows.old", "$WINDOWS.~BT", "$WINDOWS.~WS"):
         path = os.path.join(system_drive + "\\", name)
-        # A folder changed in the last 24 h most likely belongs to an ongoing or just
-        # finished feature update ($WINDOWS.~BT/~WS are still needed by the installer),
-        # so it is not offered for removal.
         if os.path.isdir(path) and not _is_fresh(path):
             items.append(JunkItem("windows_old", "folder", path, _dir_size_bytes(path)))
     return items
@@ -324,11 +318,6 @@ _PS_CURRENT_RESTORE_POINT_SEQUENCES_CMD = (
 
 
 def _as_list(value) -> list:
-    """ConvertTo-Json can serialize an array with EXACTLY one element as a bare value
-    instead of a one-element array (a known PowerShell gotcha, see the
-    PackageUserInformation normalization in core_appx.list_appx_apps). None/missing
-    is normalized to an empty list, so callers do not have to check for it.
-    """
     if value is None:
         return []
     return value if isinstance(value, list) else [value]
@@ -390,16 +379,6 @@ def _sr_remove_restore_point(seq: int) -> int:
 
 
 def _delete_restore_points(seqs: tuple) -> tuple[int, list[str]]:
-    """Deletes the given restore points by SequenceNumber. Right before deleting, and
-    INDEPENDENTLY of the scan, the CURRENT list of existing points is fetched (time
-    may have passed between the scan and the click on "Delete"; a new point may have
-    been created, e.g. by a driver install), and the current newest point is
-    computed from it. Its deletion is blocked even if its number is in `seqs`.
-    Points that no longer exist are skipped without an error. If the current list
-    cannot be obtained (e.g. PowerShell unavailable), NOTHING is deleted: better to
-    do nothing than to delete based on stale or uncertain data. Returns
-    (number_actually_deleted, list_of_errors).
-    """
     if not seqs:
         return 0, []
 
@@ -537,9 +516,6 @@ _STRAY_EXCLUDE_FRAGMENTS = (
 )
 
 
-# Cloud-synced folders (top level of the profile). Deleting a *.old/*.bak file there
-# also removes it from the cloud and from other devices, and "online-only" files are not
-# local at all, so the sweep does not touch them.
 _CLOUD_SYNC_DIR_PREFIXES = ("onedrive", "dropbox", "google drive", "icloud")
 
 
@@ -548,13 +524,7 @@ def _is_stray_excluded(dirpath_norm: str) -> bool:
 
 
 def _is_link_or_junction(path: str) -> bool:
-    """True for a symlink AND a junction. Since Python 3.8 os.path.islink() returns
-    False for junctions on Windows (they are treated like regular folders), so
-    islink() alone is not enough to skip them in os.walk, and junctions are exactly
-    the problem here (old XP aliases in the profile and user-made junctions that may
-    lead outside the profile, e.g. to another drive). On a read error it is better
-    to skip the folder than to enter it.
-    """
+    # os.path.islink() is False for junctions, so it is not enough on its own.
     try:
         if os.path.islink(path):
             return True
@@ -572,8 +542,6 @@ def _scan_stray_temp_files() -> list[JunkItem]:
     userprofile = os.environ.get("USERPROFILE")
     if not userprofile or not os.path.isdir(userprofile):
         return items
-    # An environment variable pointing at a drive root (a misconfiguration) would turn
-    # the "profile sweep" into a sweep of the whole system drive, so we do not touch it.
     if _is_drive_root(userprofile):
         return items
 
@@ -727,11 +695,6 @@ def _scan_browser_cache() -> list[JunkItem]:
     return items
 
 
-# Electron apps keep user data in %APPDATA%\<name> together with the Chromium cache. We
-# touch ONLY folders with the exact names from _CHROMIUM_CACHE_NAMES (plus two VS Code
-# caches), never the rest of the app folder (settings, sign-in, attachments, notes). The
-# list is deliberately short; a missing folder simply finds nothing. Spotify is not
-# included: its "Storage" also holds downloaded offline music, which is user data.
 _VSCODE_EXTRA_CACHE_NAMES = ("CachedData", "CachedExtensionVSIXs")
 
 _ELECTRON_APPS = (
@@ -769,8 +732,12 @@ def _scan_app_cache() -> list[JunkItem]:
     local = os.environ.get("LOCALAPPDATA")
     if local:
         steam_html = os.path.join(local, "Steam", "htmlcache")
-        for d in _chromium_cache_dirs(steam_html):
-            items.append(JunkItem("app_cache", "folder", d, _dir_size_bytes(d)))
+        steam_dirs = _chromium_cache_dirs(steam_html)
+        if steam_dirs and _is_file_in_use(os.path.join(steam_html, "lockfile")):
+            _skipped_in_use += 1
+        else:
+            for d in steam_dirs:
+                items.append(JunkItem("app_cache", "folder", d, _dir_size_bytes(d)))
     return items
 
 
@@ -1057,12 +1024,6 @@ def _is_protected_path(path: str, kind: str = "file") -> bool:
 
 
 def _delete_block_reason(item: "JunkItem") -> Optional[str]:
-    """Reason why an item must NOT be deleted (or None). Checked right before deletion,
-    not only at scan time, because time may have passed between the scan and the
-    click on "Delete": e.g. a cache folder may have been replaced by a
-    junction/symlink, and rmtree/remove on a link can reach outside the folder the
-    user saw in the list.
-    """
     if item.kind in ("special_recycle_bin", "special_restore_points"):
         return None
     if not os.path.isabs(item.path) or _is_protected_path(item.path, item.kind):
@@ -1080,10 +1041,6 @@ def _dedupe_and_prune(items: list[JunkItem]) -> list[JunkItem]:
         if key in seen_paths:
             continue
         seen_paths.add(key)
-        # Links (symlink/junction) are never "junk" to delete: the user may have moved a
-        # browser cache to a RAM disk through a junction, and a program running as
-        # administrator must not operate "through" a link in folders writable by other
-        # users.
         if it.kind not in ("special_recycle_bin", "special_restore_points") and _is_link_or_junction(it.path):
             continue
         deduped.append(it)
@@ -1111,6 +1068,10 @@ def _scan_shader_cache() -> list[JunkItem]:
         os.path.join(local, "NVIDIA", "DXCache"),
         os.path.join(local, "NVIDIA", "GLCache"),
         os.path.join(local, "AMD", "DxCache"),
+        os.path.join(local, "AMD", "DxcCache"),
+        os.path.join(local, "AMD", "GLCache"),
+        os.path.join(local, "AMD", "VkCache"),
+        os.path.join(local, "Intel", "ShaderCache"),
     ):
         items += _scan_children("shader_cache", folder)
     return items
@@ -1118,11 +1079,6 @@ def _scan_shader_cache() -> list[JunkItem]:
 
 _TEMP_OLD_SECONDS = 30 * 24 * 3600
 _ACTIVITY_SCAN_MAX_ENTRIES = 100_000
-# Infrastructure folders, not junk (case-insensitive comparison). "Low" is the temp
-# directory of low-integrity processes (protected mode, sandboxes) with its own
-# integrity label: those processes cannot write to the parent (%TEMP%), so after it is
-# deleted they cannot recreate it. Found on a real scan: "Low" was always "old" and
-# empty, so it landed on the delete list.
 _TEMP_OLD_SKIP_NAMES = frozenset({"low"})
 
 
@@ -1298,11 +1254,7 @@ _E_UNEXPECTED = -2147418113
 
 
 def _empty_recycle_bin(drives: tuple = ()) -> tuple[bool, str]:
-    """Empty the Recycle Bin ONLY on the given drives. SHEmptyRecycleBinW with
-    pszRootPath=None empties the bins of ALL drives at once, ignoring the selection
-    from Settings (the scan showed the size of the selected drives only, yet
-    deletion cleared everything). An empty tuple = legacy behaviour (all drives).
-    """
+    # pszRootPath=None would empty the bins of all drives, ignoring the selection.
     SHERB_NOCONFIRMATION = 0x00000001
     SHERB_NOPROGRESSUI = 0x00000002
     SHERB_NOSOUND = 0x00000004
@@ -1377,9 +1329,7 @@ _FOF_NOCONFIRMATION = 0x0010
 _FOF_ALLOWUNDO = 0x0040
 _FOF_NOERRORUI = 0x0400
 _FOF_WANTNUKEWARNING = 0x4000
-# SHFileOperation does not handle long paths and the Recycle Bin does not store paths
-# longer than MAX_PATH; such items are rejected instead of risking permanent deletion
-# instead of a move.
+# Longer paths are rejected: SHFileOperation would delete them permanently instead of using the Recycle Bin.
 _MAX_RECYCLE_PATH = 259
 
 REGENERABLE_CACHE_CATEGORIES = ("thumbnail_cache", "shader_cache", "prefetch", "wer_reports",
@@ -1392,7 +1342,7 @@ def _make_shfileop_struct():
     from ctypes import wintypes
 
     class SHFILEOPSTRUCTW(ctypes.Structure):
-        # On 32-bit Windows the shellapi.h header packs this structure to 1.
+        # shellapi.h packs this structure to 1 on 32-bit Windows.
         _pack_ = 1 if ctypes.sizeof(ctypes.c_void_p) == 4 else 0
         _fields_ = [
             ("hwnd", wintypes.HWND),
@@ -1444,8 +1394,7 @@ def delete_junk_items(items: list[JunkItem], mode: str = DELETE_PERMANENT) -> tu
     errors: list[str] = []
 
     if mode == DELETE_RECYCLE:
-        # Empty the Recycle Bin first, otherwise we would empty it AFTER we have put
-        # this run's items into it.
+        # Empty the Recycle Bin first, before this run's items land in it.
         items = sorted(items, key=lambda i: i.kind != "special_recycle_bin")
 
     services_to_toggle = sorted({
@@ -1453,9 +1402,6 @@ def delete_junk_items(items: list[JunkItem], mode: str = DELETE_PERMANENT) -> tu
         for item in items
         if item.category_key in _SERVICE_STOP_FOR_CATEGORY
     })
-    # Resume only the services we ACTUALLY stopped (net stop returned 0). A service that
-    # was not running anyway (e.g. wuauserv is "Manual" by default) must not be
-    # force-started after cleaning.
     stopped_services = [svc for svc in services_to_toggle if _service_control(svc, "stop")]
 
     try:

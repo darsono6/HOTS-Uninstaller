@@ -1,4 +1,4 @@
-HOTS Uninstaller v1.0
+HOTS Uninstaller v1.1
 =====================
 
 A desktop application for removing programs completely - including the
@@ -53,9 +53,10 @@ MAIN FEATURES
   only be switched on/off)
 - Junk files: 19 categories (temp files, Windows Update cache, crash
   dumps, error reports, logs, browser cache, thumbnails, Prefetch, GPU
-  shader cache, app caches, Recycle Bin and more). Opt-in extras: browser
-  history, Windows.old and old restore points. Nothing is deleted
-  automatically; optional Recycle Bin mode
+  shader cache (DirectX, NVIDIA, AMD, Intel), app caches, Recycle Bin and
+  more). A select-all switch in the scan settings turns on the default
+  categories. Opt-in extras: browser history, Windows.old and old restore
+  points. Nothing is deleted automatically; optional Recycle Bin mode
 - Install Monitor: takes a snapshot of the registry and disk, runs the
   installer (.exe or .msi) and finishes on its own when the installation
   settles. Records added registry entries, files and folders, services,
@@ -67,12 +68,15 @@ MAIN FEATURES
 - "Remove with HOTS" for portable .exe files: removes the file and its
   traces (shortcuts, Prefetch, registry history) without touching the
   folder it sits in (the right-click entry is an optional setup choice,
-  off by default)
-- Light and dark themes with 5 accent colors
+  on by default)
+- Light and dark themes with 6 accent colors, Mica or Acrylic backdrop
+  and an optional glow effect
 - Built-in update checker (via GitHub Releases); checks on startup by
-  default, can be switched off in Options > About
-- Available in 5 languages: English, Polish, French, German, Spanish
-  (the app starts in your Windows language when it is supported)
+  default, can be switched off in Options > Updates
+- License and third-party notices available from the About page
+- Available in 8 languages: English, Polish, French, German, Spanish,
+  Russian, Italian, Portuguese (the app starts in your Windows language
+  when it is supported)
 
 
 SAFETY
@@ -88,22 +92,34 @@ SAFETY
   reads or deletes anything
 - The only network request the app makes on its own is the update check
   against GitHub Releases (on by default, can be switched off in
-  Options > About). No telemetry, no account, no ads
+  Options > Updates). No telemetry, no account, no ads
 
 Removing the wrong thing can still break a program. Keep the
 restore-point option on for anything important.
 
 
-WHAT'S NEW IN 1.0
+WHAT'S NEW IN 1.1
 -----------------
-First public release.
-- Programs: list, native uninstall, leftover scan, ghost entry removal
-- Windows Apps: Microsoft Store (UWP) app removal
-- Startup manager
-- Junk files cleanup
-- Install Monitor with automatic use of its log at uninstall time
-- Registry backups and uninstall history
-- 5 languages, dark and light theme, 5 accent colors
+- New visual effects: Acrylic material next to Mica, a glow effect with
+  adjustable strength, and a switch to turn window effects off
+- New Graphite accent color (6 accent colors in total)
+- Rebuilt Options page: Language and Appearance, Updates, About and
+  Support
+- License information: the About page opens the full license and the
+  third-party notices
+- Updates: clicking an available update now downloads the installer
+  directly, instead of only opening the repository page
+- Copy diagnostics: a new button on the About page copies anonymized
+  system and program information to the clipboard, ready to paste into
+  a bug report
+- 3 new languages: Russian, Italian and Portuguese (8 in total)
+- Junk files: select-all switch in the scan settings, more GPU shader
+  caches (AMD and Intel), shorter category names, a running Steam is
+  skipped when cleaning app caches
+- Programs: "Open file location" now also works for programs that do not
+  register an install folder (for example Microsoft Edge and many
+  MSI-based programs); group headers use your accent color
+- Several fixes and stability improvements
 
 
 DISCLAIMER
@@ -114,6 +130,15 @@ other consequences resulting from the use of this application.
 Uninstalling programs and deleting files and registry entries can affect
 how Windows and other software work - review every list before you
 confirm. You use this software at your own risk.
+
+
+BUG REPORTS
+-----------
+Found a bug? In the app open About -> Copy diagnostics and paste the
+result into your report (github.com/darsono6/HOTS-Uninstaller/issues or
+email). It contains the app and Windows version and the end of the error
+log; your user name and computer name are replaced. The log may include
+names of programs you uninstalled - you can review it before pasting.
 
 
 SUPPORT

@@ -366,17 +366,7 @@ def _fs_roots() -> list[str]:
     if public:
         roots.append(os.path.join(public, "Desktop"))
 
-    # NOTE: "...\Start Menu\Programs" and "Desktop" MUST stay SEPARATE roots of their
-    # own even though they physically live inside ProgramData/APPDATA (which are roots
-    # too): every root gets its OWN depth budget (_MAX_FS_DEPTH) counted FROM it. If
-    # they were removed as "subpaths" of another root, they would be reached only
-    # through the ProgramData/APPDATA budget, which is already spent getting to
-    # "Microsoft\Windows\Start Menu\Programs", leaving zero budget for their own
-    # children (the folders of individual programs). The "before" snapshot would not see
-    # them at all, and in the comparison EVERY program folder in the Start Menu, even
-    # long-existing ones, would look "new": a false alarm on every installation. A
-    # duplicate caused by visiting the same path twice is filtered later in _scan_fs_new
-    # (see seen_paths).
+    # Start Menu and Desktop must stay separate roots: each root has its own depth budget (_MAX_FS_DEPTH).
     seen = set()
     result = []
     for r in roots:
@@ -444,7 +434,7 @@ def _list_processes() -> dict:
 
 
 def _pid_running(pid: int) -> bool:
-    _kernel32.OpenProcess.restype = wintypes.HANDLE  # default c_int would truncate a 64-bit handle
+    _kernel32.OpenProcess.restype = wintypes.HANDLE  # a c_int default would truncate a 64-bit handle
     _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     ctypes.set_last_error(0)
@@ -674,13 +664,7 @@ class MonitorSnapshot:
     registry_keys: set
     fs_paths: set
     registry_values: dict = field(default_factory=dict)
-    # Registry keys at the scan depth limit (_MAX_REG_DEPTH): their VALUES are stored
-    # but their subkeys are NOT. Without this list the comparison treated all their
-    # (already existing) subkeys as "new" as soon as the key's timestamp changed.
     registry_unexpanded: set = field(default_factory=set)
-    # Folders whose CONTENT was stored in the snapshot in full. Only these may be
-    # enumerated during the comparison; for the others (at the _MAX_FS_DEPTH limit)
-    # everything inside would look new.
     fs_scanned: set = field(default_factory=set)
     services: set = field(default_factory=set)
     tasks: set = field(default_factory=set)
@@ -1016,12 +1000,8 @@ def _scan_registry_new(before: MonitorSnapshot,
                         progress_cb: Optional[Callable[[int], None]] = None,
                         stats: Optional[dict] = None,
                         workers: int = 8) -> list[LeftoverItem]:
-    """IMPORTANT: a directory/key timestamp reflects ONLY changes of its DIRECT
-    children (a subkey added/removed), not deeper nested changes. So no change at a
-    given level does NOT excuse skipping the recursion into previously known
-    subkeys; it only allows skipping the costly search for NEW subkeys at that
-    level.
-    """
+    # A directory/key timestamp reflects only changes of its direct children,
+    # so an unchanged one does not excuse skipping deeper levels.
     results = []
     lock = threading.Lock()
 
@@ -1042,9 +1022,6 @@ def _scan_registry_new(before: MonitorSnapshot,
             progress_cb(n)
 
     def _add_new_key(hive, key_full, key_subkey):
-        # A new key that is a protected shared container (e.g. Classes\\Drive) cannot be
-        # deleted as a whole, so report its contents instead; everything below a new
-        # key is new as well.
         if not _is_protected_registry_key(hive, key_subkey):
             _add(LeftoverItem(kind="registry", path=key_full, hive=hive, subkey=key_subkey))
             return
@@ -1307,9 +1284,6 @@ _MAX_LOG_BYTES = 64 * 1024 * 1024
 
 
 def _is_reparse_point(path) -> bool:
-    """True for a symlink or a junction. If this cannot be checked, returns True
-    (better to refuse writing than to write to a foreign place).
-    """
     try:
         st = os.lstat(path)
     except OSError:
@@ -1329,10 +1303,6 @@ def _safe_logs_dir() -> Optional[Path]:
 
 
 def _write_atomically(target: Path, data: bytes) -> None:
-    """Writes to a NEW file with a random name (O_EXCL never follows a planted link),
-    then os.replace: replaces the directory entry instead of overwriting whatever a
-    link points to. Same rule as in the launcher.
-    """
     tmp = target.with_name(f".hots_{os.getpid()}_{os.urandom(6).hex()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
     try:
@@ -1385,14 +1355,6 @@ _ARROW = " \u2192 "
 
 
 def _item_from_dict(d) -> Optional[LeftoverItem]:
-    """Loads items from a log file. The file lives in the user's profile, so another
-    process may have modified it, while it is deleted by an elevated program.
-    Therefore None is returned (the item is skipped) when the data is inconsistent:
-    - registry entries: the path SHOWN to the user must exactly match the
-    hive/subkey/value_name that will actually be deleted (otherwise the log could
-    show one thing and delete another),
-    - files/folders: only an absolute disk path, without ".." and without UNC.
-    """
     if not isinstance(d, dict):
         return None
     kind = d.get("kind", "")
@@ -1446,8 +1408,7 @@ def save_monitor_log(app_name: str, items: list[LeftoverItem], key_name: str = "
         safe_name = re.sub(r"[^a-zA-Z0-9]+", "_", app_name or "install").strip("_")[:80] or "install"
         stamp = time.strftime("%Y%m%d_%H%M%S")
         log_path = logs_dir / f"{safe_name}_{stamp}.json"
-        # The hash is computed from the SAME bytes that are written, not from a re-read
-        # of the file, which someone could swap in the meantime.
+        # Hash the exact bytes that are written, not a re-read of the file.
         data = json.dumps([_item_to_dict(i) for i in items], indent=2, ensure_ascii=False).encode("utf-8")
         digest = hashlib.sha256(data).hexdigest()
         _write_atomically(log_path, data)
@@ -1568,10 +1529,7 @@ def _unseal_monitor_log(path: str) -> None:
 
 
 def _read_verified_log(path: str) -> Optional[bytes]:
-    """Content of the log, but only if its SHA-256 matches the hash sealed in HKLM. The
-    file is read ONCE and the caller parses exactly the bytes that were verified
-    (two reads would leave a window for swapping the file).
-    """
+    # Read once: the caller must parse exactly the bytes that were verified.
     try:
         with open(path, "rb") as f:
             data = f.read(_MAX_LOG_BYTES + 1)
@@ -1590,11 +1548,6 @@ def _read_verified_log(path: str) -> Optional[bytes]:
 
 
 def _is_in_logs_dir(path: str) -> bool:
-    """Whether `path` is a .json file directly in the Monitor's logs folder. The log
-    index lives in the user's profile (another process may modify it), and the
-    elevated program reads and DELETES the files from its entries; without this
-    check a modified index could direct deletion to any file.
-    """
     try:
         base = os.path.normcase(os.path.realpath(str(_monitor_logs_dir())))
         p = os.path.normcase(os.path.realpath(path))

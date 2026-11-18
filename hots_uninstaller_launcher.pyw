@@ -10,11 +10,7 @@ def _uninst_log(text):
 
 
 def _validated_path(raw):
-    # The uninstall modes run elevated and get file paths on the command line, so a planted
-    # symlink/junction in %TEMP% must not let them touch any other file. Returns a safe target
-    # path or None. Requirements: absolute path inside the temp dir, %APPDATA%\\HOTS Uninstaller
-    # or the launcher folder (also after resolving links); the file itself is not a link, a
-    # directory or hard-linked; no ':' in the name (NTFS alternate streams).
+    # Returns a safe target path or None: the elevated modes must not follow planted links in %TEMP%.
     try:
         if not raw or not os.path.isabs(raw):
             return None
@@ -56,9 +52,7 @@ def _validated_path(raw):
 
 
 def _write_atomically(real_target, data):
-    # Write to a NEW randomly named file (O_EXCL, never follows a planted link), then os.replace:
-    # that swaps the directory entry instead of overwriting what a link points to, and a reader
-    # never sees a half-written file.
+    # Write to a new randomly named file (O_EXCL), then os.replace: never follows a planted link.
     tmp = os.path.join(os.path.dirname(real_target),
                        f".hots_{os.getpid()}_{os.urandom(6).hex()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
@@ -75,14 +69,6 @@ def _write_atomically(real_target, data):
 
 
 def _drop_directory_links():
-    """The program's data folder lives in the user's profile, and an ELEVATED process
-    writes to it. If someone replaced it (or its backup/log subfolder) with a link
-    (junction/symlink), the admin-level program would write and delete files in a
-    foreign place. So the link is removed BEFORE the first write (os.rmdir removes
-    the link itself, not its target) and replaced with a regular folder. (A rare,
-    deliberate user junction loses its pointer this way, but not data: it stays at
-    the target.)
-    """
     try:
         base = Path(os.environ.get("APPDATA", Path.home())) / "HOTS Uninstaller"
         get_attrs = ctypes.windll.kernel32.GetFileAttributesW
@@ -103,37 +89,26 @@ _drop_directory_links()
 log_path = Path(os.environ.get("APPDATA", Path.home())) / "HOTS Uninstaller" / "error.log"
 log_path.parent.mkdir(parents=True, exist_ok=True)
 
-_LOG_MAX_BYTES = 250 * 1024
+_LOG_MAX_BYTES = 1024 * 1024
 
 
 def _prepare_log_file(path: Path, max_bytes: int = _LOG_MAX_BYTES) -> None:
-    """Log rotation: above the limit the file moves to error.log.1 (one copy,
-    overwritten each time). If another instance holds the file open, Windows will
-    not let it be moved and rotation is silently skipped (the next start does it). A
-    symlink in place of the log is removed, because the elevated process would
-    append through it to a foreign file.
-    """
     try:
         if os.path.islink(path):
             os.unlink(path)
         elif os.path.isfile(path) and os.path.getsize(path) > max_bytes:
-            os.replace(path, str(path) + ".1")
+            open(path, "w").close()
     except OSError:
         pass
 
 
 _prepare_log_file(log_path)
-# Mode "a" (not "w"): a later launch that only wakes the already running instance, or
-# goes through UAC, must not wipe the log of the instance that is already running. The
-# previous session stays in the file (useful after a crash); its size is kept in check
-# by the rotation above.
 _log = open(log_path, "a", encoding="utf-8", buffering=1)
 sys.stderr = _log
 sys.stdout = _log
 
 
-# Uninstall, step 1 (shown by the uninstaller before anything is removed).
-# Exit code: 0 = confirmed (choices saved), 3 = cancelled, 2 = refused path, 1 = error.
+# Exit codes: 0 = confirmed, 3 = cancelled, 2 = refused path, 1 = error.
 if len(sys.argv) >= 3 and sys.argv[1] == "--uninstall-wizard":
     def _run_uninstall_wizard() -> int:
         import json
@@ -172,7 +147,10 @@ if len(sys.argv) >= 3 and sys.argv[1] == "--uninstall-wizard":
             except Exception:
                 pass
 
-            counts = {"saved_items": uninstall_flow.count_saved_items()}
+            counts = {
+                "settings_items": uninstall_flow.count_settings_items(),
+                "backup_items": uninstall_flow.count_backup_items(),
+            }
 
             from hots_uninstaller.dialogs.self_uninstall_wizard import SelfUninstallWizardDialog
             dlg = SelfUninstallWizardDialog(counts=counts)
@@ -188,8 +166,7 @@ if len(sys.argv) >= 3 and sys.argv[1] == "--uninstall-wizard":
     sys.exit(_run_uninstall_wizard())
 
 
-# Uninstall, step 2 (run by hots_uninstall_cleanup.cmd): applies the saved choices.
-# Exit code: 0 = done (result written), 2 = refused result path, 3 = result could not be written.
+# Exit codes: 0 = done, 2 = refused result path, 3 = result could not be written.
 if len(sys.argv) >= 4 and sys.argv[1] == "--uninstall-apply":
     def _run_uninstall_apply() -> int:
         import json
@@ -199,7 +176,7 @@ if len(sys.argv) >= 4 and sys.argv[1] == "--uninstall-apply":
         if result_path is None:
             _uninst_log(f"[apply] refused result path: {sys.argv[3]!r}")
             return 2
-        report = {"errors": [], "delete_data": False}
+        report = {"errors": [], "delete_settings": False, "delete_backups": False}
 
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -252,36 +229,105 @@ def _set_app_user_model_id():
 _set_app_user_model_id()
 
 
-# Names are in the "Local\" namespace (one logon session), not "Global\": a global
-# object could be created in advance by a process from ANY session/user (the program
-# would silently never start), and a second logged-in user could not have their own
-# instance. The elevated and non-elevated processes of the same user share the session,
-# so they see each other.
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_adv = ctypes.WinDLL("advapi32", use_last_error=True)
+
+_k32.CreateMutexW.restype = ctypes.c_void_p
+_k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+_k32.OpenEventW.restype = ctypes.c_void_p
+_k32.OpenEventW.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_wchar_p]
+_k32.SetEvent.argtypes = [ctypes.c_void_p]
+_k32.CloseHandle.argtypes = [ctypes.c_void_p]
+_k32.LocalFree.restype = ctypes.c_void_p
+_k32.LocalFree.argtypes = [ctypes.c_void_p]
+_adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+    ctypes.c_wchar_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+]
+_adv.GetSecurityInfo.restype = ctypes.c_ulong
+_adv.GetSecurityInfo.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_ulong, ctypes.POINTER(ctypes.c_void_p),
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+]
+_adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+
+
+class _SECURITY_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [
+        ("nLength", ctypes.c_ulong),
+        ("lpSecurityDescriptor", ctypes.c_void_p),
+        ("bInheritHandle", ctypes.c_int),
+    ]
+
+
+_SE_KERNEL_OBJECT = 6
+_OWNER_SECURITY_INFORMATION = 1
+_READ_CONTROL = 0x00020000
+_EVENT_MODIFY_STATE = 0x0002
+_ERROR_ALREADY_EXISTS = 183
+_TRUSTED_OWNER_SIDS = ("S-1-5-32-544", "S-1-5-18")
+_MUTEX_SDDL = "D:(A;;GA;;;SY)(A;;GA;;;BA)"
+
+
+def _mutex_security_attributes():
+    try:
+        p_sd = ctypes.c_void_p()
+        if not _adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            _MUTEX_SDDL, 1, ctypes.byref(p_sd), None
+        ) or not p_sd:
+            return None, None
+        sa = _SECURITY_ATTRIBUTES()
+        sa.nLength = ctypes.sizeof(_SECURITY_ATTRIBUTES)
+        sa.lpSecurityDescriptor = p_sd
+        sa.bInheritHandle = False
+        return sa, p_sd
+    except Exception:
+        return None, None
+
+
+def _object_owner_is_trusted(handle) -> bool:
+    try:
+        owner = ctypes.c_void_p()
+        descriptor = ctypes.c_void_p()
+        if _adv.GetSecurityInfo(handle, _SE_KERNEL_OBJECT, _OWNER_SECURITY_INFORMATION,
+                                ctypes.byref(owner), None, None, None, ctypes.byref(descriptor)) != 0:
+            return False
+        try:
+            sid_text = ctypes.c_wchar_p()
+            if not owner or not _adv.ConvertSidToStringSidW(owner, ctypes.byref(sid_text)):
+                return False
+            try:
+                return sid_text.value in _TRUSTED_OWNER_SIDS
+            finally:
+                _k32.LocalFree(ctypes.cast(sid_text, ctypes.c_void_p))
+        finally:
+            _k32.LocalFree(descriptor)
+    except Exception:
+        return False
+
+
+# "Local\" namespace, not "Global\": a global object could be created in advance by a process of any session.
 _MUTEX_NAME = "Local\\HOTS_Uninstaller_SingleInstance_Mutex"
 _mutex_handle = None
 
 
 def _acquire_single_instance_lock() -> bool:
-    """True = we are the first instance. The mutex has the DEFAULT access (creator,
-    SYSTEM, Administrators), not open to everyone. When an elevated instance is
-    running, a non-elevated process cannot open its mutex (ERROR_ACCESS_DENIED),
-    which also means "the program is already running".
-    """
     global _mutex_handle
     try:
-        ERROR_ALREADY_EXISTS = 183
-        k32 = ctypes.windll.kernel32
-        k32.CreateMutexW.restype = ctypes.c_void_p
-        k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
-        k32.CloseHandle.argtypes = [ctypes.c_void_p]
-        handle = k32.CreateMutexW(None, False, _MUTEX_NAME)
+        sa, p_sd = _mutex_security_attributes()
+        try:
+            handle = _k32.CreateMutexW(ctypes.byref(sa) if sa is not None else None, False, _MUTEX_NAME)
+            error = ctypes.get_last_error()
+        finally:
+            if p_sd:
+                _k32.LocalFree(p_sd)
         if not handle:
-            return False
-        if k32.GetLastError() == ERROR_ALREADY_EXISTS:
-            k32.CloseHandle(handle)
-            return False
-        _mutex_handle = handle
-        return True
+            return True
+        if error != _ERROR_ALREADY_EXISTS:
+            _mutex_handle = handle
+            return True
+        trusted = _object_owner_is_trusted(handle)
+        _k32.CloseHandle(handle)
+        return not trusted
     except Exception:
         return True
 
@@ -290,7 +336,7 @@ def release_single_instance_lock():
     global _mutex_handle
     if _mutex_handle:
         try:
-            ctypes.windll.kernel32.CloseHandle(_mutex_handle)
+            _k32.CloseHandle(_mutex_handle)
         except Exception:
             pass
         _mutex_handle = None
@@ -299,37 +345,24 @@ def release_single_instance_lock():
 _ACTIVATE_EVENT_NAME = "Local\\HOTSUninstaller_ActivateEvent"
 
 
-def _signal_running_instance() -> bool:
-    """Signals the already running (elevated) instance that someone tried to start the
-    program again, without touching its window. This process is NOT elevated at this
-    point (before any UAC), and Windows (UIPI) stops lower-privilege processes from
-    forcing focus/restoring the window of a higher-privilege process
-    (ShowWindow/SetForegroundWindow on a minimized window may be silently ignored).
-    SetEvent on a named object needs no special rights, so it works across that
-    boundary.
-    """
+def _signal_running_instance(before_signal=None) -> bool:
     try:
-        EVENT_MODIFY_STATE = 0x0002
-        SYNCHRONIZE = 0x00100000
-        handle = ctypes.windll.kernel32.OpenEventW(
-            EVENT_MODIFY_STATE | SYNCHRONIZE, False, _ACTIVATE_EVENT_NAME
-        )
+        handle = _k32.OpenEventW(_EVENT_MODIFY_STATE | _READ_CONTROL, False, _ACTIVATE_EVENT_NAME)
         if not handle:
             return False
         try:
-            return bool(ctypes.windll.kernel32.SetEvent(handle))
+            if not _object_owner_is_trusted(handle):
+                return False
+            if before_signal is not None:
+                before_signal()
+            return bool(_k32.SetEvent(handle))
         finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
+            _k32.CloseHandle(handle)
     except Exception:
         return False
 
 
 def _enqueue_remove_request():
-    """Click on "Usun z HOTS" while the program is already running: this short-lived
-    process cannot open a window in the elevated instance, so it appends the path to
-    the queue file (read by the running instance after the signal). Standard library
-    only: the program package is not imported here yet.
-    """
     try:
         args = sys.argv[1:]
         if "--remove" not in args:
@@ -391,9 +424,7 @@ def _focus_existing_instance():
 def _relaunch_as_admin():
     is_frozen = getattr(sys, "frozen", False) or "__compiled__" in globals()
     if is_frozen:
-        # NOTE: sys.executable can be unreliable in Nuitka builds (it may point to a
-        # non-existent "python.exe" instead of the real renamed output exe); sys.argv[0]
-        # is the actual path of the running executable.
+        # sys.executable can be wrong in Nuitka builds; sys.argv[0] is the real path of the running exe.
         target = sys.argv[0]
         params = " ".join(f'"{a}"' for a in sys.argv[1:])
     else:
@@ -432,23 +463,12 @@ _exit_code = 0
 try:
     print("START", flush=True)
 
-    if not _acquire_single_instance_lock():
-        print("Program is already running — switching to existing window.", flush=True)
-        _enqueue_remove_request()
-        if not _signal_running_instance():
-            print("Event signal failed/unavailable — falling back to direct window focus.", flush=True)
-            _focus_existing_instance()
-        sys.exit(0)
-
     if not _is_admin():
+        if _signal_running_instance(_enqueue_remove_request):
+            print("Program is already running — switching to existing window.", flush=True)
+            sys.exit(0)
         print("Not admin — relaunching with UAC...", flush=True)
         print(f"sys.executable={sys.executable!r} sys.argv={sys.argv!r} __file__={__file__!r} frozen={getattr(sys, 'frozen', False)} compiled={'__compiled__' in globals()}", flush=True)
-        if _mutex_handle:
-            try:
-                ctypes.windll.kernel32.CloseHandle(_mutex_handle)
-            except Exception:
-                pass
-            _mutex_handle = None
         ok = _relaunch_as_admin()
         if ok:
             sys.exit(0)
@@ -472,6 +492,14 @@ try:
                 print(f"messagebox failed: {e2}", flush=True)
             sys.exit(1)
 
+    if not _acquire_single_instance_lock():
+        print("Program is already running — switching to existing window.", flush=True)
+        _enqueue_remove_request()
+        if not _signal_running_instance():
+            print("Event signal failed/unavailable — falling back to direct window focus.", flush=True)
+            _focus_existing_instance()
+        sys.exit(0)
+
     print(f"===== session {time.strftime('%Y-%m-%d %H:%M:%S')} =====", flush=True)
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -492,8 +520,14 @@ except Exception:
         from PySide6.QtWidgets import QApplication, QMessageBox
         app = QApplication.instance() or QApplication(sys.argv)
         m = QMessageBox()
-        m.setWindowTitle(_tr("startup_error_title", "{app} — Error", app="HOTS Uninstaller"))
-        m.setText(tb[:1000])
+        m.setWindowTitle(_tr("startup_failed_title", "{app} — Startup Error", app="HOTS Uninstaller"))
+        m.setText(_tr("startup_failed_msg", "The program failed to start."))
+        m.setInformativeText(_tr(
+            "startup_failed_details",
+            "Error details:\n{details}\n\nFull log: {path}",
+            details=tb.strip().splitlines()[-1][:300],
+            path=log_path,
+        ))
         m.exec()
     except Exception as e2:
         print(f"messagebox failed: {e2}", flush=True)

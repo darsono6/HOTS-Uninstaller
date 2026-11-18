@@ -47,7 +47,7 @@ class LeftoverDialog(HOTSDialog):
 
     def _card_style(self) -> str:
         return (f"QWidget#leftoverCard {{ background: {DARK['panel_bg']}; "
-                f"border: 1px solid {DARK['border_faint']}; border-radius: 6px; }}")
+                f"border: 1px solid {DARK['border_faint']}; border-radius: 8px; }}")
 
     def _build(self):
         cl = self.body_layout
@@ -64,7 +64,7 @@ class LeftoverDialog(HOTSDialog):
             warn_frame.setObjectName("leftoverWarn")
             warn_frame.setStyleSheet(
                 f"QWidget#leftoverWarn {{ background: {DARK['panel_bg']}; "
-                f"border: 1px solid {DARK['border_faint']}; border-radius: 6px; }}")
+                f"border: 1px solid {DARK['border_faint']}; border-radius: 8px; }}")
             warn_lay = QHBoxLayout(warn_frame)
             warn_lay.setContentsMargins(14, 10, 14, 10)
             warn = QLabel(T("leftover_installed_warning"))
@@ -192,7 +192,7 @@ class LeftoverDialog(HOTSDialog):
 
                 path_item = QTableWidgetItem(item.path)
                 path_item.setFlags(path_item.flags() & ~Qt.ItemIsEditable)
-                path_item.setToolTip(item.path)
+                path_item.setToolTip(item.path + (f"\n\n{T('leftover_src_' + item.source)}" if item.source else ""))
                 self.table.setItem(row, 1, path_item)
 
                 size_text = f"{item.size_kb / 1024.0:.1f} MB" if item.size_kb >= 1024 else (

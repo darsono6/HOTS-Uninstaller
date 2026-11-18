@@ -9,13 +9,11 @@ from .uninstall_wizard import UninstallWizardDialog, AppxUninstallWizardDialog
 from .self_uninstall_wizard import SelfUninstallWizardDialog
 from .support_page    import SupportPage
 from .about_page      import AboutPage
-from .language_dialog import LanguageDialog
-from .accent_dialog   import AccentColorDialog
+from .options_page    import OptionsPage
 
 __all__ = [
     "ProgramsPage", "AppxPage", "StartupPage", "JunkPage", "MonitorPage", "BackupsPage", "LeftoverDialog",
     "UninstallWizardDialog", "AppxUninstallWizardDialog",
     "SelfUninstallWizardDialog",
-    "SupportPage", "AboutPage",
-    "LanguageDialog", "AccentColorDialog",
+    "SupportPage", "AboutPage", "OptionsPage",
 ]

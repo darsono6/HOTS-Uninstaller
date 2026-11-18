@@ -6,7 +6,7 @@
 
 [![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20%2864--bit%29-0078D4?logo=windows)](https://github.com/)
-[![Language](https://img.shields.io/badge/Language-EN%20%7C%20PL%20%7C%20FR%20%7C%20DE%20%7C%20ES-brightgreen)](#language-support)
+[![Language](https://img.shields.io/badge/Language-EN%20%7C%20PL%20%7C%20FR%20%7C%20DE%20%7C%20ES%20%7C%20RU%20%7C%20IT%20%7C%20PT-brightgreen)](#language-support)
 
 ### [Download for Windows - free](https://github.com/darsono6/HOTS-Uninstaller/releases/latest)
 
@@ -48,17 +48,21 @@ If you'd rather double-check the app yourself first, the full source code is rig
 
 ---
 
-## What's new in 1.0
+## What's new in 1.1
 
-First public release.
-
-- **Programs** — full list of installed programs with search and sorting, native one-click uninstall, leftover scan, and forced removal of broken ("ghost") entries
-- **Windows Apps** — uninstall Microsoft Store (UWP) apps, with warnings for core Windows components
-- **Startup** — see everything that launches with Windows and switch it off (reversibly) or remove it
-- **Junk Files** — 19 categories of junk, nothing deleted until you confirm
-- **Install Monitor** — before/after snapshot of the registry and disk; the result is used automatically when you later uninstall that program
-- **Registry Backups** and **uninstall history** — restore a removed key if something turns out to be needed
-- 5 languages, dark and light theme, 5 accent colors
+- **New visual effects** — Acrylic material next to Mica, a glow effect with adjustable strength (transparency in Acrylic mode), and a switch to turn window effects off
+- **New accent color** — Graphite joins the existing five, so there are now 6 accent colors
+- **Rebuilt Options page** — expandable cards for Language and Appearance, plus Updates (check for updates on startup, manual check), About and Support
+- **License information** — the About page now opens the full license and the third-party notices
+- **Updates** — clicking an available update now downloads the installer directly, instead of only opening the repository page
+- **Copy diagnostics** — a new button on the About page copies anonymized system and program information to the clipboard, ready to paste into a bug report
+- **3 new languages** — Русский, Italiano and Português, bringing the total to 8
+- **Junk Files** — a "Select all" switch at the top of the scan settings (it turns on the default categories only; the opt-in ones stay your choice), more GPU shader caches (AMD and Intel in addition to DirectX and NVIDIA), shorter category names, and running Steam is now skipped when cleaning app caches
+- **Programs** — "Open file location" now also works for programs that don't register an install folder (for example Microsoft Edge and many MSI-based programs), and group headers use your accent color
+- **Sorting** — a new sort button next to the search box on the Programs and Windows Apps pages: by name, size or install date. The button's color shows the current mode and your choice is remembered
+- **Windows Apps** — a new "New apps" group at the top for apps installed in the last 14 days (the same window as in Programs), and the install date is shown in the app details
+- **Self-protection** — HOTS Uninstaller no longer offers to uninstall itself while it is running: its entry stays in the Programs list with a greyed-out trash icon and no uninstall item in the context menu (use Windows Settings → Apps instead)
+- Several fixes and stability improvements in the code
 
 ---
 
@@ -77,7 +81,7 @@ First public release.
 - **Forced removal of ghost entries** — programs whose uninstaller no longer exists (the entry is still in the list, the files are gone) can be cleaned out. Only the registry entry is removed, with a backup, and the leftover scan runs first
 - **Protected and hidden components** — system components and sub-packages are hidden unless you choose to show them, and carry a warning
 - **Right-click menu** — open the install location, jump to the registry entry, copy the path, view properties, or search the name online
-- **Remove portable programs** — a "Remove with HOTS" action for standalone `.exe` files cleans up the file and its traces (shortcuts, Prefetch, registry history) without touching the folder it sits in. The installer can also add it to Explorer's right-click menu (an optional setup choice, off by default)
+- **Remove portable programs** — a "Remove with HOTS" action for standalone `.exe` files cleans up the file and its traces (shortcuts, Prefetch, registry history) without touching the folder it sits in. The installer can also add it to Explorer's right-click menu (an optional setup choice, on by default)
 
 </details>
 
@@ -119,8 +123,10 @@ First public release.
 <details>
 <summary><strong>🧹 Junk Files</strong> — click to expand</summary>
 
-- **19 categories**, including user and Windows temp files, Windows Update and Delivery Optimization cache, crash dumps and error reports, logs, browser cache, thumbnails, Prefetch, GPU shader cache, app caches (Discord, Slack, VS Code, Steam…), the Recycle Bin and old files in `%TEMP%`
-- **Opt-in extras** with clear warnings: browser history and download lists (Chrome, Edge, Brave, Vivaldi, Opera), the previous Windows installation (`Windows.old`), and old system restore points (the newest is always kept)
+- **19 categories**, including user and Windows temp files, Windows Update and Delivery Optimization cache, crash dumps and error reports, logs, browser cache, thumbnails, Prefetch, GPU shader cache (DirectX, NVIDIA, AMD, Intel), app caches (Discord, Slack, VS Code, Steam…), the Recycle Bin and old files in `%TEMP%`
+- **Off by default:** some categories stay unticked until you switch them on yourself, for example Prefetch, GPU shader cache, the Recycle Bin, stray temp files and old files in `%TEMP%`
+- **Opt-in extras** with clear warnings: browser history and download lists (Chrome, Edge, Brave, Vivaldi, Opera), the previous Windows installation (`Windows.old`), and old system restore points (the newest is always kept). These are switched off again each time the app starts
+- **Select all** switch in the scan settings turns on every category that is on by default; categories that are off by default, including the opt-in extras, are never switched on by it. Switching it off clears every category
 - **Nothing is deleted automatically** — you scan, review and confirm
 - Optional **Recycle Bin mode** instead of permanent deletion (cache-type items are always removed permanently, and the app says so)
 - Files in use and protected locations are skipped, and a summary shows the space freed
@@ -157,10 +163,11 @@ First public release.
 <details>
 <summary><strong>🎨 Other features</strong> — click to expand</summary>
 
-- Light and dark themes, 5 accent colors (yellow, red, green, blue, orange), custom window with Mica backdrop on Windows 11
-- 5 languages: English, Polski, Français, Deutsch, Español — the app starts in your Windows language when it is supported
-- Built-in update checker (checks GitHub Releases on startup — can be switched off in **Options → About**)
+- Light and dark themes, 6 accent colors (yellow, red, green, blue, orange, graphite), custom window with Mica or Acrylic backdrop and an optional glow on Windows 11
+- 8 languages: English, Polski, Français, Deutsch, Español, Русский, Italiano, Português — the app starts in your Windows language when it is supported
+- Built-in update checker (checks GitHub Releases on startup — can be switched off in **Options → Updates**)
 - Uninstall wizard for the app itself — choose whether to keep or delete its saved settings, history, monitor logs and registry backups
+- License and third-party notices available from the About page
 - Auto-elevation, single-instance guard, window size and position memory
 
 </details>
@@ -177,7 +184,7 @@ An uninstaller runs with administrator rights and deletes things, so the app is 
 - Nothing is pre-selected, and items that are only *possibly* related are never included by the select-all button
 - System services are never touched; a leftover service is removed only if it is an application service whose program file no longer exists
 - The data folder, backups and logs are validated before the elevated app reads or deletes anything, so another program can't redirect it to other files
-- The only network request the app makes on its own is the update check against GitHub Releases (on by default, can be switched off in **Options → About**). There is no telemetry, no account and no ads
+- The only network request the app makes on its own is the update check against GitHub Releases (on by default, can be switched off in **Options → Updates**). There is no telemetry, no account and no ads
 
 That said, removing the wrong thing can still break a program. Keep the restore-point option on for anything important.
 
@@ -231,7 +238,7 @@ hots_uninstaller/
 ├── icons.py                # Built-in SVG icon set
 ├── resource_utils.py       # Base-path resolution (dev / frozen builds)
 ├── win_icon.py             # Window icon applied through the Win32 API
-├── i18n.py                 # Multilingual string system (EN / PL / FR / DE / ES)
+├── i18n.py                 # Multilingual string system (EN / PL / FR / DE / ES / RU / IT / PT)
 ├── graphic/                # Logos, window icon, splash image, donate buttons
 └── dialogs/
     ├── programs_page.py        # Installed programs list
@@ -244,8 +251,7 @@ hots_uninstaller/
     ├── uninstall_wizard.py     # Uninstall flow for other programs and Store apps
     ├── summary_dialog.py       # Result summary
     ├── self_uninstall_wizard.py  # Uninstall-time wizard for HOTS Uninstaller itself
-    ├── language_dialog.py      # Language selection
-    ├── accent_dialog.py        # Accent color picker
+    ├── options_page.py         # Options — language, appearance, updates
     ├── support_page.py         # Support / donate window
     ├── about_page.py           # About & update checker
     └── _*.py                   # Shared/internal helpers for the pages above
@@ -266,6 +272,9 @@ The interface language can be changed in **Options → Language** (a restart app
 | `fr` | Français |
 | `de` | Deutsch |
 | `es` | Español |
+| `ru` | Русский |
+| `it` | Italiano |
+| `pt` | Português |
 
 ---
 
@@ -285,7 +294,7 @@ HOTS Uninstaller is provided in good faith but **without any warranty**. The aut
 
 ## Bug reports
 
-Found a bug? Open an [issue](https://github.com/darsono6/HOTS-Uninstaller/issues/new/choose) — the form asks for everything needed to reproduce it. The app also keeps a log at `%APPDATA%\HOTS Uninstaller\error.log`, which is helpful to attach.
+Found a bug? Open an [issue](https://github.com/darsono6/HOTS-Uninstaller/issues/new/choose) — the form asks for everything needed to reproduce it. In the app, open **About → Copy diagnostics** and paste the result into the report — it contains the app and Windows version and the end of the error log (your user name and computer name are replaced). The log may include names of programs you uninstalled, so feel free to review it before pasting. The full log is kept at `%APPDATA%\HOTS Uninstaller\error.log`.
 
 ---
 
@@ -299,7 +308,9 @@ Found a security issue? Please report it privately rather than opening a public 
 
 If HOTS Uninstaller saves you time or you simply want to say thanks:
 
-<a href="https://ko-fi.com/darsono"><img src="assets/kofi_badge_dark.png" alt="Support me on Ko-fi" width="200"/></a>
+<p align="center">
+<a href="https://ko-fi.com/darsono"><img src="assets/kofi_badge_dark.png" alt="Support me on Ko-fi" width="150"/></a>
+</p>
 
 **Website:** [hotstools.com](https://hotstools.com)
 **Ko-fi:** [ko-fi.com/darsono](https://ko-fi.com/darsono)
