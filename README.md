@@ -61,7 +61,6 @@ If you'd rather double-check the app yourself first, the full source code is rig
 - **Programs** — "Open file location" now also works for programs that don't register an install folder (for example Microsoft Edge and many MSI-based programs), and group headers use your accent color
 - **Sorting** — a new sort button next to the search box on the Programs and Windows Apps pages: by name, size or install date. The button's color shows the current mode and your choice is remembered
 - **Windows Apps** — a new "New apps" group at the top for apps installed in the last 14 days (the same window as in Programs), and the install date is shown in the app details
-- **Self-protection** — HOTS Uninstaller no longer offers to uninstall itself while it is running: its entry stays in the Programs list with a greyed-out trash icon and no uninstall item in the context menu (use Windows Settings → Apps instead)
 - Several fixes and stability improvements in the code
 
 ---
